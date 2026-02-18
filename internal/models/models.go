@@ -1,10 +1,13 @@
 package models
 
 import (
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+var ErrInsufficientFunds = errors.New("insufficient funds")
 
 type User struct {
 	ID        uuid.UUID `json:"id"`
