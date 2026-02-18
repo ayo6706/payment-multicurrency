@@ -4,9 +4,12 @@ import (
 	"log"
 
 	"github.com/ayo6706/payment-multicurrency/internal/db"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	_ = godotenv.Load() // Load .env file if present
+
 	log.Println("Starting Payment System...")
 
 	// Initialize Database Connection

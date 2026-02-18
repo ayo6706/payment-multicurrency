@@ -1,2 +1,26 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Output
+dist/
+bin/
+
+# Agent
+.agent/
+.cortex/
+.gemini/
+.specs/
+
+# IDEs
+.vscode/
+.idea/
+
 # Environment
 .env
+
+# OS
+.DS_Store
+Thumbs.db
