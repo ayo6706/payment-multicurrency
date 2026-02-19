@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	_ = godotenv.Load() // Load .env file if present
+	_ = godotenv.Load()
 
 	log.Println("Starting Payment System...")
 
