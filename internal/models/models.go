@@ -5,9 +5,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
-var ErrInsufficientFunds = errors.New("insufficient funds")
+var (
+	ErrInsufficientFunds   = errors.New("insufficient funds")
+	ErrUnsupportedCurrency = errors.New("unsupported currency")
+	ErrRateUnavailable     = errors.New("exchange rate unavailable")
+)
 
 type User struct {
 	ID        uuid.UUID `json:"id"`
@@ -25,13 +30,15 @@ type Account struct {
 }
 
 type Transaction struct {
-	ID          uuid.UUID `json:"id"`
-	Amount      int64     `json:"amount"`
-	Currency    string    `json:"currency"`
-	Type        string    `json:"type"`   // e.g., "transfer"
-	Status      string    `json:"status"` // e.g., "pending", "completed", "failed"
-	ReferenceID string    `json:"reference_id"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          uuid.UUID        `json:"id"`
+	Amount      int64            `json:"amount"`
+	Currency    string           `json:"currency"`
+	Type        string           `json:"type"`   // e.g., "transfer"
+	Status      string           `json:"status"` // e.g., "pending", "completed", "failed"
+	ReferenceID string           `json:"reference_id"`
+	FXRate      *decimal.Decimal `json:"fx_rate,omitempty"` // populated for FX_EXCHANGE type
+	Metadata    map[string]any   `json:"metadata,omitempty"`
+	CreatedAt   time.Time        `json:"created_at"`
 }
 
 type Entry struct {
