@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/ayo6706/payment-multicurrency/internal/models"
@@ -15,7 +16,10 @@ import (
 // setupTestDB is a helper to connect to the DB and clean it up.
 // NOTE: This assumes a running Postgres instance via docker-compose on localhost:5432.
 func setupTestDB(t *testing.T) *pgxpool.Pool {
-	connString := "postgres://user:password@localhost:5432/payment_system?sslmode=disable"
+	connString := os.Getenv("DATABASE_URL")
+	if connString == "" {
+		connString = "postgres://user:password@localhost:5432/payment_system?sslmode=disable"
+	}
 	db, err := pgxpool.New(context.Background(), connString)
 	if err != nil {
 		t.Fatalf("Failed to connect to DB: %v", err)
@@ -39,57 +43,57 @@ func TestTransfer(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 1. Setup Alice and Bob
-	alice := &models.User{
+	// 1. Setup Ayo and David
+	ayo := &models.User{
 		ID:       uuid.New(),
-		Username: "alice",
-		Email:    "alice@example.com",
+		Username: "ayo",
+		Email:    "ayo@example.com",
 	}
-	err := repo.CreateUser(ctx, alice)
+	err := repo.CreateUser(ctx, ayo)
 	require.NoError(t, err)
 
-	bob := &models.User{
+	david := &models.User{
 		ID:       uuid.New(),
-		Username: "bob",
-		Email:    "bob@example.com",
+		Username: "david",
+		Email:    "david@example.com",
 	}
-	err = repo.CreateUser(ctx, bob)
+	err = repo.CreateUser(ctx, david)
 	require.NoError(t, err)
 
-	// 2. Setup Accounts (Alice has $100, Bob has $0)
-	aliceAcc := &models.Account{
+	// 2. Setup Accounts (Ayo has $100, David has $0)
+	ayoAcc := &models.Account{
 		ID:       uuid.New(),
-		UserID:   alice.ID,
+		UserID:   ayo.ID,
 		Currency: "USD",
 		Balance:  100,
 	}
-	err = repo.CreateAccount(ctx, aliceAcc)
+	err = repo.CreateAccount(ctx, ayoAcc)
 	require.NoError(t, err)
 
-	bobAcc := &models.Account{
+	davidAcc := &models.Account{
 		ID:       uuid.New(),
-		UserID:   bob.ID,
+		UserID:   david.ID,
 		Currency: "USD",
 		Balance:  0,
 	}
-	err = repo.CreateAccount(ctx, bobAcc)
+	err = repo.CreateAccount(ctx, davidAcc)
 	require.NoError(t, err)
 
-	// 3. Perform Transfer: Alice sends $50 to Bob
+	// 3. Perform Transfer: Ayo sends $50 to David
 	amount := int64(50)
-	err = svc.Transfer(ctx, aliceAcc.ID, bobAcc.ID, amount, "ref-123")
+	_, err = svc.Transfer(ctx, ayoAcc.ID, davidAcc.ID, amount, "ref-123")
 	require.NoError(t, err)
 
 	// 4. Verify Balances
-	var aliceBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", aliceAcc.ID).Scan(&aliceBalance)
+	var ayoBalance int64
+	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", ayoAcc.ID).Scan(&ayoBalance)
 	require.NoError(t, err)
-	assert.Equal(t, int64(50), aliceBalance) // Should be 50 after transfer
+	assert.Equal(t, int64(50), ayoBalance) // Should be 50 after transfer
 
-	var bobBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", bobAcc.ID).Scan(&bobBalance)
+	var davidBalance int64
+	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", davidAcc.ID).Scan(&davidBalance)
 	require.NoError(t, err)
-	assert.Equal(t, int64(50), bobBalance) // Should be 50 after transfer
+	assert.Equal(t, int64(50), davidBalance) // Should be 50 after transfer
 }
 func TestTransferDeadlock(t *testing.T) {
 	db := setupTestDB(t)
@@ -100,35 +104,37 @@ func TestTransferDeadlock(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 1. Setup Alice and Bob
-	alice := &models.User{ID: uuid.New(), Username: "alice", Email: "alice@example.com"}
-	err := repo.CreateUser(ctx, alice)
+	// 1. Setup Ayo and David
+	ayo := &models.User{ID: uuid.New(), Username: "ayo", Email: "ayo@example.com"}
+	err := repo.CreateUser(ctx, ayo)
 	require.NoError(t, err)
 
-	bob := &models.User{ID: uuid.New(), Username: "bob", Email: "bob@example.com"}
-	err = repo.CreateUser(ctx, bob)
+	david := &models.User{ID: uuid.New(), Username: "david", Email: "david@example.com"}
+	err = repo.CreateUser(ctx, david)
 	require.NoError(t, err)
 
 	// 2. Setup Accounts with $100 each
-	aliceAcc := &models.Account{ID: uuid.New(), UserID: alice.ID, Currency: "USD", Balance: 100}
-	err = repo.CreateAccount(ctx, aliceAcc)
+	ayoAcc := &models.Account{ID: uuid.New(), UserID: ayo.ID, Currency: "USD", Balance: 100}
+	err = repo.CreateAccount(ctx, ayoAcc)
 	require.NoError(t, err)
 
-	bobAcc := &models.Account{ID: uuid.New(), UserID: bob.ID, Currency: "USD", Balance: 100}
-	err = repo.CreateAccount(ctx, bobAcc)
+	davidAcc := &models.Account{ID: uuid.New(), UserID: david.ID, Currency: "USD", Balance: 100}
+	err = repo.CreateAccount(ctx, davidAcc)
 	require.NoError(t, err)
 
-	// 3. Perform concurrent transfers: Alice -> Bob and Bob -> Alice
+	// 3. Perform concurrent transfers: Ayo -> David and David -> Ayo
 	n := 10
 	amount := int64(10)
 	errs := make(chan error, n*2)
 
 	for i := 0; i < n; i++ {
 		go func(idx int) {
-			errs <- svc.Transfer(ctx, aliceAcc.ID, bobAcc.ID, amount, uuid.New().String())
+			_, err := svc.Transfer(ctx, ayoAcc.ID, davidAcc.ID, amount, uuid.New().String())
+			errs <- err
 		}(i)
 		go func(idx int) {
-			errs <- svc.Transfer(ctx, bobAcc.ID, aliceAcc.ID, amount, uuid.New().String())
+			_, err := svc.Transfer(ctx, davidAcc.ID, ayoAcc.ID, amount, uuid.New().String())
+			errs <- err
 		}(i)
 	}
 
@@ -139,13 +145,13 @@ func TestTransferDeadlock(t *testing.T) {
 	}
 
 	// 5. Verify Balances (should still be $100 each if n transfers each way)
-	var aliceBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", aliceAcc.ID).Scan(&aliceBalance)
+	var ayoBalance int64
+	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", ayoAcc.ID).Scan(&ayoBalance)
 	require.NoError(t, err)
-	assert.Equal(t, int64(100), aliceBalance)
+	assert.Equal(t, int64(100), ayoBalance)
 
-	var bobBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", bobAcc.ID).Scan(&bobBalance)
+	var davidBalance int64
+	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", davidAcc.ID).Scan(&davidBalance)
 	require.NoError(t, err)
-	assert.Equal(t, int64(100), bobBalance)
+	assert.Equal(t, int64(100), davidBalance)
 }
