@@ -25,7 +25,8 @@ func (api *Router) Routes() chi.Router {
 	r.Use(chiMiddleware.Recoverer)
 
 	// Services
-	transferSvc := service.NewTransferService(api.repo, api.db)
+	mockFX := service.NewMockExchangeRateService()
+	transferSvc := service.NewTransferService(api.repo, api.db, mockFX)
 	accountSvc := service.NewAccountService(api.repo)
 
 	// Handlers
@@ -49,6 +50,7 @@ func (api *Router) Routes() chi.Router {
 
 		// Transfers
 		r.With(middleware.IdempotencyMiddleware).Post("/v1/transfers/internal", transferHandler.MakeInternalTransfer)
+		r.With(middleware.IdempotencyMiddleware).Post("/v1/transfers/exchange", transferHandler.MakeExchangeTransfer)
 	})
 
 	return r
