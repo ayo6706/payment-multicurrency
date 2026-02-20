@@ -7,4 +7,14 @@ const (
 	SystemAccountUSD = "22222222-2222-2222-2222-222222222222"
 	SystemAccountEUR = "33333333-3333-3333-3333-333333333333"
 	SystemAccountGBP = "44444444-4444-4444-4444-444444444444"
+
+	DirectionDebit  = "debit"
+	DirectionCredit = "credit"
+
+	TxTypeTransfer = "transfer"
+	TxTypeExchange = "exchange"
+
+	TxStatusCompleted = "completed"
+	TxStatusFailed    = "failed"
+	TxStatusPending   = "pending"
 )

@@ -113,20 +113,20 @@ func (s *TransferService) Transfer(ctx context.Context, fromAccountID, toAccount
 	// 2. Create Transaction Record
 	transactionID := uuid.New()
 	_, err = tx.Exec(ctx, `INSERT INTO transactions (id, amount, currency, type, status, reference_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-		transactionID, amount, fromCurrency, "transfer", "completed", referenceID)
+		transactionID, amount, fromCurrency, domain.TxTypeTransfer, domain.TxStatusCompleted, referenceID)
 	if err != nil {
 		return nil, err
 	}
 
 	// 3. Create Double Entries
 	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`,
-		uuid.New(), transactionID, fromAccountID, amount, "debit")
+		uuid.New(), transactionID, fromAccountID, amount, domain.DirectionDebit)
 	if err != nil {
 		return nil, err
 	}
 
 	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`,
-		uuid.New(), transactionID, toAccountID, amount, "credit")
+		uuid.New(), transactionID, toAccountID, amount, domain.DirectionCredit)
 	if err != nil {
 		return nil, err
 	}
@@ -150,8 +150,8 @@ func (s *TransferService) Transfer(ctx context.Context, fromAccountID, toAccount
 		ID:          transactionID,
 		Amount:      amount,
 		Currency:    fromCurrency,
-		Type:        "transfer",
-		Status:      "completed",
+		Type:        domain.TxTypeTransfer,
+		Status:      domain.TxStatusCompleted,
 		ReferenceID: referenceID,
 		// CreatedAt: time.Now(),
 	}, nil
@@ -187,7 +187,7 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 	if err == nil {
 		return &existingTx, nil
 	}
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("failed to check idempotency: %w", err)
 	}
 
@@ -279,7 +279,7 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 	transactionID := uuid.New()
 	_, err = tx.Exec(ctx, `INSERT INTO transactions (id, amount, currency, type, status, reference_id, fx_rate, metadata, created_at) 
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
-		transactionID, amountSource, cmd.FromCurrency, "exchange", "completed", cmd.ReferenceID, rate, map[string]any{
+		transactionID, amountSource, cmd.FromCurrency, domain.TxTypeExchange, domain.TxStatusCompleted, cmd.ReferenceID, rate, map[string]any{
 			"from_currency": cmd.FromCurrency,
 			"to_currency":   cmd.ToCurrency,
 			"target_amount": amountTarget,
@@ -291,29 +291,29 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 	// 8. Create 4 Ledger Entries
 
 	// Entry 1: Debit User (Source Currency)
-	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, 'debit', NOW())`,
-		uuid.New(), transactionID, cmd.FromAccountID, amountSource)
+	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`,
+		uuid.New(), transactionID, cmd.FromAccountID, amountSource, domain.DirectionDebit)
 	if err != nil {
 		return nil, err
 	}
 
 	// Entry 2: Credit Liquidity (Source Currency)
-	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, 'credit', NOW())`,
-		uuid.New(), transactionID, liqSourceID, amountSource)
+	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`,
+		uuid.New(), transactionID, liqSourceID, amountSource, domain.DirectionCredit)
 	if err != nil {
 		return nil, err
 	}
 
 	// Entry 3: Debit Liquidity (Target Currency)
-	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, 'debit', NOW())`,
-		uuid.New(), transactionID, liqTargetID, amountTarget)
+	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`,
+		uuid.New(), transactionID, liqTargetID, amountTarget, domain.DirectionDebit)
 	if err != nil {
 		return nil, err
 	}
 
 	// Entry 4: Credit User (Target Currency)
-	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, 'credit', NOW())`,
-		uuid.New(), transactionID, cmd.ToAccountID, amountTarget)
+	_, err = tx.Exec(ctx, `INSERT INTO entries (id, transaction_id, account_id, amount, direction, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`,
+		uuid.New(), transactionID, cmd.ToAccountID, amountTarget, domain.DirectionCredit)
 	if err != nil {
 		return nil, err
 	}
@@ -350,8 +350,8 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 		ID:          transactionID,
 		Amount:      amountSource,
 		Currency:    cmd.FromCurrency,
-		Type:        "exchange",
-		Status:      "completed",
+		Type:        domain.TxTypeExchange,
+		Status:      domain.TxStatusCompleted,
 		ReferenceID: cmd.ReferenceID,
 		FXRate:      &rate,
 	}, nil
