@@ -7,17 +7,19 @@ import (
 	"strings"
 
 	"github.com/ayo6706/payment-multicurrency/internal/models"
+	"github.com/ayo6706/payment-multicurrency/internal/repository"
 	"github.com/ayo6706/payment-multicurrency/internal/service"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 type TransferHandler struct {
-	svc *service.TransferService
+	svc  *service.TransferService
+	repo *repository.Repository
 }
 
-func NewTransferHandler(svc *service.TransferService) *TransferHandler {
-	return &TransferHandler{svc: svc}
+func NewTransferHandler(svc *service.TransferService, repo *repository.Repository) *TransferHandler {
+	return &TransferHandler{svc: svc, repo: repo}
 }
 
 func (h *TransferHandler) MakeInternalTransfer(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +55,20 @@ func (h *TransferHandler) MakeInternalTransfer(w http.ResponseWriter, r *http.Re
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid to_account_id"})
+		return
+	}
+	actorID, isAdmin, err := requestActor(r)
+	if err != nil {
+		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	fromAcc, err := h.repo.GetAccount(r.Context(), fromID)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid from_account_id")
+		return
+	}
+	if !isAdmin && fromAcc.UserID != actorID {
+		RespondError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
 
@@ -126,6 +142,20 @@ func (h *TransferHandler) MakeExchangeTransfer(w http.ResponseWriter, r *http.Re
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid to_account_id"})
+		return
+	}
+	actorID, isAdmin, err := requestActor(r)
+	if err != nil {
+		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	fromAcc, err := h.repo.GetAccount(r.Context(), fromID)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid from_account_id")
+		return
+	}
+	if !isAdmin && fromAcc.UserID != actorID {
+		RespondError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
 
