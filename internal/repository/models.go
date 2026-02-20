@@ -62,6 +62,18 @@ type Entry struct {
 	CreatedAt     pgtype.Timestamp `db:"created_at" json:"created_at"`
 }
 
+type Payout struct {
+	ID            pgtype.UUID        `db:"id" json:"id"`
+	TransactionID pgtype.UUID        `db:"transaction_id" json:"transaction_id"`
+	AccountID     pgtype.UUID        `db:"account_id" json:"account_id"`
+	AmountMicros  int64              `db:"amount_micros" json:"amount_micros"`
+	Currency      string             `db:"currency" json:"currency"`
+	Status        string             `db:"status" json:"status"`
+	GatewayRef    *string            `db:"gateway_ref" json:"gateway_ref"`
+	CreatedAt     pgtype.Timestamptz `db:"created_at" json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `db:"updated_at" json:"updated_at"`
+}
+
 type Transaction struct {
 	ID          pgtype.UUID      `db:"id" json:"id"`
 	Amount      int64            `db:"amount" json:"amount"`

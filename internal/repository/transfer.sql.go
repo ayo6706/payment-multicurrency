@@ -131,6 +131,41 @@ func (q *Queries) GetAccountCurrency(ctx context.Context, id pgtype.UUID) (strin
 	return currency, err
 }
 
+const getTransaction = `-- name: GetTransaction :one
+SELECT id, amount, currency, type, status, reference_id, fx_rate, metadata, created_at
+FROM transactions
+WHERE id = $1
+`
+
+type GetTransactionRow struct {
+	ID          pgtype.UUID      `db:"id" json:"id"`
+	Amount      int64            `db:"amount" json:"amount"`
+	Currency    string           `db:"currency" json:"currency"`
+	Type        string           `db:"type" json:"type"`
+	Status      string           `db:"status" json:"status"`
+	ReferenceID string           `db:"reference_id" json:"reference_id"`
+	FxRate      pgtype.Numeric   `db:"fx_rate" json:"fx_rate"`
+	Metadata    []byte           `db:"metadata" json:"metadata"`
+	CreatedAt   pgtype.Timestamp `db:"created_at" json:"created_at"`
+}
+
+func (q *Queries) GetTransaction(ctx context.Context, id pgtype.UUID) (GetTransactionRow, error) {
+	row := q.db.QueryRow(ctx, getTransaction, id)
+	var i GetTransactionRow
+	err := row.Scan(
+		&i.ID,
+		&i.Amount,
+		&i.Currency,
+		&i.Type,
+		&i.Status,
+		&i.ReferenceID,
+		&i.FxRate,
+		&i.Metadata,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const lockAccount = `-- name: LockAccount :one
 SELECT id FROM accounts WHERE id = $1 FOR UPDATE
 `
@@ -142,8 +177,8 @@ func (q *Queries) LockAccount(ctx context.Context, id pgtype.UUID) (pgtype.UUID,
 }
 
 const updateAccountBalance = `-- name: UpdateAccountBalance :exec
-UPDATE accounts 
-SET balance = balance + $1 
+UPDATE accounts
+SET balance = balance + $1
 WHERE id = $2
 `
 
@@ -154,5 +189,21 @@ type UpdateAccountBalanceParams struct {
 
 func (q *Queries) UpdateAccountBalance(ctx context.Context, arg UpdateAccountBalanceParams) error {
 	_, err := q.db.Exec(ctx, updateAccountBalance, arg.Balance, arg.ID)
+	return err
+}
+
+const updateTransactionStatus = `-- name: UpdateTransactionStatus :exec
+UPDATE transactions
+SET status = $1
+WHERE id = $2
+`
+
+type UpdateTransactionStatusParams struct {
+	Status string      `db:"status" json:"status"`
+	ID     pgtype.UUID `db:"id" json:"id"`
+}
+
+func (q *Queries) UpdateTransactionStatus(ctx context.Context, arg UpdateTransactionStatusParams) error {
+	_, err := q.db.Exec(ctx, updateTransactionStatus, arg.Status, arg.ID)
 	return err
 }

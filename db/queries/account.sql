@@ -24,3 +24,26 @@ LIMIT $2 OFFSET $3;
 SELECT id, username, email, created_at 
 FROM users 
 WHERE id = $1;
+
+-- name: LockAccountFunds :exec
+UPDATE accounts
+SET locked_micros = locked_micros + $1
+WHERE id = $2;
+
+-- name: ReleaseAccountFunds :exec
+UPDATE accounts
+SET locked_micros = locked_micros - $1
+WHERE id = $2;
+
+-- name: DeductLockedFunds :exec
+UPDATE accounts
+SET locked_micros = locked_micros - $1, balance = balance - $1
+WHERE id = $2;
+
+-- name: CreditAccount :exec
+UPDATE accounts
+SET balance = balance + $1
+WHERE id = $2;
+
+-- name: GetAccountBalanceAndLocked :one
+SELECT balance, locked_micros, currency FROM accounts WHERE id = $1 FOR UPDATE;

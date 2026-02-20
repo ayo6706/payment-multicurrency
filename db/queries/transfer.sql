@@ -23,6 +23,16 @@ VALUES ($1, $2, $3, $4, $5, NOW())
 RETURNING id;
 
 -- name: UpdateAccountBalance :exec
-UPDATE accounts 
-SET balance = balance + $1 
+UPDATE accounts
+SET balance = balance + $1
+WHERE id = $2;
+
+-- name: GetTransaction :one
+SELECT id, amount, currency, type, status, reference_id, fx_rate, metadata, created_at
+FROM transactions
+WHERE id = $1;
+
+-- name: UpdateTransactionStatus :exec
+UPDATE transactions
+SET status = $1
 WHERE id = $2;

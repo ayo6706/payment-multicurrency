@@ -55,6 +55,38 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (pgtype.
 	return created_at, err
 }
 
+const creditAccount = `-- name: CreditAccount :exec
+UPDATE accounts
+SET balance = balance + $1
+WHERE id = $2
+`
+
+type CreditAccountParams struct {
+	Balance int64       `db:"balance" json:"balance"`
+	ID      pgtype.UUID `db:"id" json:"id"`
+}
+
+func (q *Queries) CreditAccount(ctx context.Context, arg CreditAccountParams) error {
+	_, err := q.db.Exec(ctx, creditAccount, arg.Balance, arg.ID)
+	return err
+}
+
+const deductLockedFunds = `-- name: DeductLockedFunds :exec
+UPDATE accounts
+SET locked_micros = locked_micros - $1, balance = balance - $1
+WHERE id = $2
+`
+
+type DeductLockedFundsParams struct {
+	LockedMicros int64       `db:"locked_micros" json:"locked_micros"`
+	ID           pgtype.UUID `db:"id" json:"id"`
+}
+
+func (q *Queries) DeductLockedFunds(ctx context.Context, arg DeductLockedFundsParams) error {
+	_, err := q.db.Exec(ctx, deductLockedFunds, arg.LockedMicros, arg.ID)
+	return err
+}
+
 const getAccount = `-- name: GetAccount :one
 SELECT id, user_id, currency, balance, created_at 
 FROM accounts 
@@ -79,6 +111,23 @@ func (q *Queries) GetAccount(ctx context.Context, id pgtype.UUID) (GetAccountRow
 		&i.Balance,
 		&i.CreatedAt,
 	)
+	return i, err
+}
+
+const getAccountBalanceAndLocked = `-- name: GetAccountBalanceAndLocked :one
+SELECT balance, locked_micros, currency FROM accounts WHERE id = $1 FOR UPDATE
+`
+
+type GetAccountBalanceAndLockedRow struct {
+	Balance      int64  `db:"balance" json:"balance"`
+	LockedMicros int64  `db:"locked_micros" json:"locked_micros"`
+	Currency     string `db:"currency" json:"currency"`
+}
+
+func (q *Queries) GetAccountBalanceAndLocked(ctx context.Context, id pgtype.UUID) (GetAccountBalanceAndLockedRow, error) {
+	row := q.db.QueryRow(ctx, getAccountBalanceAndLocked, id)
+	var i GetAccountBalanceAndLockedRow
+	err := row.Scan(&i.Balance, &i.LockedMicros, &i.Currency)
 	return i, err
 }
 
@@ -146,4 +195,36 @@ func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (GetUserRow, erro
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const lockAccountFunds = `-- name: LockAccountFunds :exec
+UPDATE accounts
+SET locked_micros = locked_micros + $1
+WHERE id = $2
+`
+
+type LockAccountFundsParams struct {
+	LockedMicros int64       `db:"locked_micros" json:"locked_micros"`
+	ID           pgtype.UUID `db:"id" json:"id"`
+}
+
+func (q *Queries) LockAccountFunds(ctx context.Context, arg LockAccountFundsParams) error {
+	_, err := q.db.Exec(ctx, lockAccountFunds, arg.LockedMicros, arg.ID)
+	return err
+}
+
+const releaseAccountFunds = `-- name: ReleaseAccountFunds :exec
+UPDATE accounts
+SET locked_micros = locked_micros - $1
+WHERE id = $2
+`
+
+type ReleaseAccountFundsParams struct {
+	LockedMicros int64       `db:"locked_micros" json:"locked_micros"`
+	ID           pgtype.UUID `db:"id" json:"id"`
+}
+
+func (q *Queries) ReleaseAccountFunds(ctx context.Context, arg ReleaseAccountFundsParams) error {
+	_, err := q.db.Exec(ctx, releaseAccountFunds, arg.LockedMicros, arg.ID)
+	return err
 }

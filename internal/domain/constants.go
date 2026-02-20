@@ -13,8 +13,17 @@ const (
 
 	TxTypeTransfer = "transfer"
 	TxTypeExchange = "exchange"
+	TxTypePayout   = "payout"
+	TxTypeDeposit  = "deposit"
 
-	TxStatusCompleted = "completed"
-	TxStatusFailed    = "failed"
-	TxStatusPending   = "pending"
+	TxStatusCompleted  = "completed"
+	TxStatusFailed     = "failed"
+	TxStatusPending    = "pending"
+	TxStatusProcessing = "processing"
+
+	// Payout statuses
+	PayoutStatusPending    = "PENDING"
+	PayoutStatusProcessing = "PROCESSING"
+	PayoutStatusCompleted  = "COMPLETED"
+	PayoutStatusFailed     = "FAILED"
 )
