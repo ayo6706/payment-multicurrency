@@ -20,7 +20,8 @@ func TestHandleDepositWebhookUpdatesBalances(t *testing.T) {
 	defer db.Close()
 
 	repoSvc := repository.NewRepository(db)
-	svc := NewWebhookService(repoSvc, db, "secret", false)
+	store := repository.NewStore(db)
+	svc := NewWebhookService(store, "secret", false)
 
 	ctx := context.Background()
 
@@ -62,7 +63,8 @@ func TestHandleDepositWebhookRejectsBadSignature(t *testing.T) {
 	defer db.Close()
 
 	repoSvc := repository.NewRepository(db)
-	svc := NewWebhookService(repoSvc, db, "secret", false)
+	store := repository.NewStore(db)
+	svc := NewWebhookService(store, "secret", false)
 
 	ctx := context.Background()
 

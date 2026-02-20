@@ -11,13 +11,11 @@ import (
 )
 
 type Repository struct {
-	db      *pgxpool.Pool
 	queries *Queries
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{
-		db:      db,
 		queries: New(db),
 	}
 }
