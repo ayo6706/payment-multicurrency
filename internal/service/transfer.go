@@ -7,6 +7,7 @@ import (
 
 	"github.com/ayo6706/payment-multicurrency/internal/domain"
 	"github.com/ayo6706/payment-multicurrency/internal/models"
+	"github.com/ayo6706/payment-multicurrency/internal/observability"
 	"github.com/ayo6706/payment-multicurrency/internal/repository"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -175,6 +176,11 @@ func (s *TransferService) Transfer(ctx context.Context, fromAccountID, toAccount
 	if err != nil {
 		return nil, fmt.Errorf("failed to update receiver balance: %w", err)
 	}
+
+	balanceAudit := map[string]int64{}
+	balanceAudit[fromCurrency] -= amount
+	balanceAudit[fromCurrency] += amount
+	auditLedgerBalances(balanceAudit)
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
@@ -441,6 +447,13 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 		return nil, fmt.Errorf("failed to credit user account: %w", err)
 	}
 
+	fxAudit := map[string]int64{}
+	fxAudit[cmd.FromCurrency] -= amountSource
+	fxAudit[cmd.FromCurrency] += amountSource
+	fxAudit[cmd.ToCurrency] -= amountTarget
+	fxAudit[cmd.ToCurrency] += amountTarget
+	auditLedgerBalances(fxAudit)
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
@@ -469,4 +482,12 @@ func getSystemAccountID(currency string) (uuid.UUID, error) {
 		return uuid.Nil, fmt.Errorf("unsupported currency for system liquidity: %s", currency)
 	}
 	return uuid.Parse(idStr)
+}
+
+func auditLedgerBalances(balances map[string]int64) {
+	for currency, sum := range balances {
+		if sum != 0 {
+			observability.IncrementLedgerImbalance(currency)
+		}
+	}
 }
