@@ -3,10 +3,10 @@ package worker
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/ayo6706/payment-multicurrency/internal/service"
+	"go.uber.org/zap"
 )
 
 // PayoutWorker processes pending payouts in the background.
@@ -24,7 +24,7 @@ func NewPayoutWorker(payoutSvc *service.PayoutService) *PayoutWorker {
 	return &PayoutWorker{
 		payoutService: payoutSvc,
 		pollInterval:  10 * time.Second, // Default: poll every 10 seconds
-		batchSize:     10,                // Process up to 10 payouts at a time
+		batchSize:     10,               // Process up to 10 payouts at a time
 		stopCh:        make(chan struct{}),
 	}
 }
@@ -44,7 +44,7 @@ func (w *PayoutWorker) WithBatchSize(size int32) *PayoutWorker {
 // Start begins the background worker.
 // It runs in a loop until Stop is called or the context is canceled.
 func (w *PayoutWorker) Start(ctx context.Context) {
-	log.Printf("[PayoutWorker] Starting with poll interval: %v, batch size: %d", w.pollInterval, w.batchSize)
+	zap.L().Info("payout worker starting", zap.Duration("poll_interval", w.pollInterval), zap.Int32("batch_size", w.batchSize))
 
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
@@ -52,10 +52,10 @@ func (w *PayoutWorker) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[PayoutWorker] Context canceled, stopping...")
+			zap.L().Info("payout worker context canceled")
 			return
 		case <-w.stopCh:
-			log.Println("[PayoutWorker] Stop signal received, stopping...")
+			zap.L().Info("payout worker stop signal received")
 			return
 		case <-ticker.C:
 			w.processBatch(ctx)
@@ -72,7 +72,7 @@ func (w *PayoutWorker) Stop() {
 func (w *PayoutWorker) processBatch(ctx context.Context) {
 	err := w.payoutService.ProcessPayouts(ctx, w.batchSize)
 	if err != nil {
-		log.Printf("[PayoutWorker] Error processing payouts: %v", err)
+		zap.L().Error("payout worker batch failed", zap.Error(err))
 	}
 }
 
