@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/ayo6706/payment-multicurrency/internal/models"
@@ -11,12 +12,73 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type panicStore struct{}
+
+func (panicStore) Queries() *repository.Queries {
+	panic("unexpected Queries call")
+}
+
+func (panicStore) RunInTx(ctx context.Context, fn func(q *repository.Queries) error) error {
+	return errors.New("unexpected RunInTx call")
+}
+
+func TestTransferValidation(t *testing.T) {
+	svc := NewTransferService(panicStore{}, NewMockExchangeRateService())
+	aid := uuid.New()
+	bid := uuid.New()
+
+	cases := []struct {
+		name        string
+		fromID      uuid.UUID
+		toID        uuid.UUID
+		amount      int64
+		referenceID string
+	}{
+		{name: "non_positive_amount", fromID: aid, toID: bid, amount: 0, referenceID: "ref"},
+		{name: "missing_reference", fromID: aid, toID: bid, amount: 1, referenceID: ""},
+		{name: "same_account", fromID: aid, toID: aid, amount: 1, referenceID: "ref"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.Transfer(context.Background(), tc.fromID, tc.toID, tc.amount, tc.referenceID)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestTransferExchangeValidation(t *testing.T) {
+	svc := NewTransferService(panicStore{}, NewMockExchangeRateService())
+	aid := uuid.New()
+	bid := uuid.New()
+
+	cases := []struct {
+		name string
+		cmd  TransferExchangeCmd
+	}{
+		{name: "non_positive_amount", cmd: TransferExchangeCmd{FromAccountID: aid, ToAccountID: bid, Amount: 0, ReferenceID: "r", FromCurrency: "USD", ToCurrency: "EUR"}},
+		{name: "missing_reference", cmd: TransferExchangeCmd{FromAccountID: aid, ToAccountID: bid, Amount: 1, ReferenceID: "", FromCurrency: "USD", ToCurrency: "EUR"}},
+		{name: "same_account", cmd: TransferExchangeCmd{FromAccountID: aid, ToAccountID: aid, Amount: 1, ReferenceID: "r", FromCurrency: "USD", ToCurrency: "EUR"}},
+		{name: "same_currency", cmd: TransferExchangeCmd{FromAccountID: aid, ToAccountID: bid, Amount: 1, ReferenceID: "r", FromCurrency: "USD", ToCurrency: "USD"}},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.TransferExchange(context.Background(), tc.cmd)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestTransfer(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
 	repo := repository.NewRepository(db)
-	svc := NewTransferService(repo, db, NewMockExchangeRateService())
+	store := repository.NewStore(db)
+	svc := NewTransferService(store, NewMockExchangeRateService())
 
 	ctx := context.Background()
 
@@ -75,7 +137,8 @@ func TestTransferDeadlock(t *testing.T) {
 	defer db.Close()
 
 	repo := repository.NewRepository(db)
-	svc := NewTransferService(repo, db, NewMockExchangeRateService())
+	store := repository.NewStore(db)
+	svc := NewTransferService(store, NewMockExchangeRateService())
 
 	ctx := context.Background()
 
@@ -134,7 +197,8 @@ func TestTransferExchange(t *testing.T) {
 	defer db.Close()
 
 	repo := repository.NewRepository(db)
-	svc := NewTransferService(repo, db, NewMockExchangeRateService())
+	store := repository.NewStore(db)
+	svc := NewTransferService(store, NewMockExchangeRateService())
 
 	ctx := context.Background()
 
