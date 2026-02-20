@@ -2,10 +2,10 @@ package handler
 
 import (
 	"io"
-	"log"
 	"net/http"
 
 	"github.com/ayo6706/payment-multicurrency/internal/service"
+	"go.uber.org/zap"
 )
 
 // WebhookHandler handles incoming webhook events from external systems.
@@ -25,7 +25,7 @@ func NewWebhookHandler(webhookSvc *service.WebhookService) *WebhookHandler {
 func (h *WebhookHandler) HandleDepositWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("Error reading webhook body: %v", err)
+		zap.L().Error("read webhook body failed", zap.Error(err))
 		RespondError(w, http.StatusBadRequest, "Failed to read request body")
 		return
 	}
@@ -35,7 +35,7 @@ func (h *WebhookHandler) HandleDepositWebhook(w http.ResponseWriter, r *http.Req
 	// Call service to process the webhook
 	resp, err := h.webhookSvc.HandleDepositWebhook(r.Context(), body, signature)
 	if err != nil {
-		log.Printf("Error processing deposit webhook: %v", err)
+		zap.L().Error("process deposit webhook failed", zap.Error(err))
 		if err.Error() == "invalid signature" {
 			RespondError(w, http.StatusUnauthorized, "Invalid signature")
 			return
