@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/ayo6706/payment-multicurrency/internal/models"
 	"github.com/shopspring/decimal"
 )
 
@@ -40,7 +42,7 @@ func (s *MockExchangeRateService) GetExchangeRate(ctx context.Context, source, t
 	targetRate, ok2 := rates[target]
 
 	if !ok1 || !ok2 {
-		return decimal.Zero, nil // Handle e.g. unknown currency
+		return decimal.Zero, fmt.Errorf("%w: %s->%s", models.ErrUnsupportedCurrency, source, target)
 	}
 
 	// Rate = Target / Source

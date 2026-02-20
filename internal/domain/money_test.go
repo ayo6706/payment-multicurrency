@@ -7,41 +7,80 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestMoney_ToDecimal(t *testing.T) {
-	m := NewMoney(10_500_000, "USD") // 10.50 USD
-	d := m.ToDecimal()
-	assert.Equal(t, "10.5", d.String())
-}
+func TestMoneyConversions(t *testing.T) {
+	t.Run("to_decimal", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			micros   int64
+			currency string
+			want     string
+		}{
+			{name: "usd_two_decimals", micros: 10_500_000, currency: "USD", want: "10.5"},
+			{name: "zero", micros: 0, currency: "EUR", want: "0"},
+		}
 
-func TestFromDecimal(t *testing.T) {
-	d := decimal.NewFromFloat(10.50)
-	micros := FromDecimal(d)
-	assert.Equal(t, int64(10_500_000), micros)
-}
+		for _, tc := range cases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				got := NewMoney(tc.micros, tc.currency).ToDecimal().String()
+				assert.Equal(t, tc.want, got)
+			})
+		}
+	})
 
-func TestMoney_Convert(t *testing.T) {
-	// Source: 100 USD
-	source := NewMoney(100_000_000, "USD")
+	t.Run("from_decimal", func(t *testing.T) {
+		cases := []struct {
+			name string
+			in   decimal.Decimal
+			want int64
+		}{
+			{name: "exact_half", in: decimal.NewFromFloat(10.50), want: 10_500_000},
+			{name: "integer", in: decimal.NewFromInt(3), want: 3_000_000},
+		}
 
-	// Rate: 1 USD = 0.92 EUR
-	rate := decimal.NewFromFloat(0.92)
+		for _, tc := range cases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				assert.Equal(t, tc.want, FromDecimal(tc.in))
+			})
+		}
+	})
 
-	// Target: 92 EUR
-	target := source.Convert("EUR", rate)
+	t.Run("convert", func(t *testing.T) {
+		cases := []struct {
+			name           string
+			sourceMicros   int64
+			sourceCurrency string
+			targetCurrency string
+			rate           decimal.Decimal
+			wantMicros     int64
+		}{
+			{
+				name:           "usd_to_eur",
+				sourceMicros:   100_000_000,
+				sourceCurrency: "USD",
+				targetCurrency: "EUR",
+				rate:           decimal.NewFromFloat(0.92),
+				wantMicros:     92_000_000,
+			},
+			{
+				name:           "precision",
+				sourceMicros:   100_000_000,
+				sourceCurrency: "USD",
+				targetCurrency: "EUR",
+				rate:           decimal.NewFromFloat(0.925555),
+				wantMicros:     92_555_500,
+			},
+		}
 
-	assert.Equal(t, "EUR", target.Currency)
-	assert.Equal(t, int64(92_000_000), target.Amount)
-}
-
-func TestMoney_Convert_Precision(t *testing.T) {
-	// Source: 100 USD
-	source := NewMoney(100_000_000, "USD")
-
-	// Rate: 1 USD = 0.925555 EUR
-	// Expected: 92.5555 EUR -> 92,555,500 micros
-	rate := decimal.NewFromFloat(0.925555)
-
-	target := source.Convert("EUR", rate)
-
-	assert.Equal(t, int64(92_555_500), target.Amount)
+		for _, tc := range cases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				source := NewMoney(tc.sourceMicros, tc.sourceCurrency)
+				got := source.Convert(tc.targetCurrency, tc.rate)
+				assert.Equal(t, tc.targetCurrency, got.Currency)
+				assert.Equal(t, tc.wantMicros, got.Amount)
+			})
+		}
+	})
 }
