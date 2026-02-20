@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/ayo6706/payment-multicurrency/internal/domain"
 	"github.com/ayo6706/payment-multicurrency/internal/gateway"
@@ -15,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
 )
 
 // PayoutService handles business logic for external payouts.
@@ -356,7 +356,7 @@ func (s *PayoutService) handlePayoutSuccess(ctx context.Context, payoutID, accou
 		ID:         repository.ToPgUUID(payoutID),
 	})
 	if statusUpdateErr != nil {
-		log.Printf("[PayoutService] failed to update payout status for %s inside tx: %v", payoutID, statusUpdateErr)
+		zap.L().Warn("payout status update failed inside tx", zap.Error(statusUpdateErr), zap.String("payout_id", payoutID.String()))
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -370,7 +370,7 @@ func (s *PayoutService) handlePayoutSuccess(ctx context.Context, payoutID, accou
 			GatewayRef: &ref,
 			ID:         repository.ToPgUUID(payoutID),
 		}); err != nil {
-			log.Printf("[PayoutService] retrying payout status update failed for %s: %v", payoutID, err)
+			zap.L().Error("payout status retry failed", zap.Error(err), zap.String("payout_id", payoutID.String()))
 		}
 	}
 }
