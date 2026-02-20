@@ -18,6 +18,7 @@ type User struct {
 	ID        uuid.UUID `json:"id"`
 	Username  string    `json:"username"`
 	Email     string    `json:"email"`
+	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -51,13 +52,13 @@ type Entry struct {
 }
 
 type Payout struct {
-	ID            uuid.UUID  `json:"id"`
-	TransactionID uuid.UUID  `json:"transaction_id"`
-	AccountID     uuid.UUID  `json:"account_id"`
-	AmountMicros  int64      `json:"amount_micros"`
-	Currency      string     `json:"currency"`
-	Status        string     `json:"status"`
-	GatewayRef    *string    `json:"gateway_ref,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID            uuid.UUID `json:"id"`
+	TransactionID uuid.UUID `json:"transaction_id"`
+	AccountID     uuid.UUID `json:"account_id"`
+	AmountMicros  int64     `json:"amount_micros"`
+	Currency      string    `json:"currency"`
+	Status        string    `json:"status"`
+	GatewayRef    *string   `json:"gateway_ref,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
