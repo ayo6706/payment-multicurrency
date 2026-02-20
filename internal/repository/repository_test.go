@@ -43,14 +43,13 @@ func TestCreateUser_And_Account(t *testing.T) {
 		t.Fatalf("CreateUser failed: %v", err)
 	}
 
-	// Verify
-	var count int
-	err = pool.QueryRow(ctx, "SELECT count(*) FROM users WHERE id=$1", user.ID).Scan(&count)
+	// Verify User creation logic using GetUser method
+	dbUser, err := repo.GetUser(ctx, user.ID)
 	if err != nil {
-		t.Fatalf("Failed to query user: %v", err)
+		t.Fatalf("Failed to get user: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("Expected 1 user, got %d", count)
+	if dbUser.ID != user.ID {
+		t.Errorf("Expected user ID %s, got %s", user.ID, dbUser.ID)
 	}
 
 	// 2. Test CreateAccount
@@ -67,22 +66,17 @@ func TestCreateUser_And_Account(t *testing.T) {
 		t.Fatalf("CreateAccount failed: %v", err)
 	}
 
-	// Verify Account creation logic
-	err = pool.QueryRow(ctx, "SELECT count(*) FROM accounts WHERE id=$1", account.ID).Scan(&count)
+	// Verify Account creation logic using GetAccount method
+	dbAccount, err := repo.GetAccount(ctx, account.ID)
 	if err != nil {
-		t.Fatalf("Failed to query account: %v", err)
+		t.Fatalf("Failed to get account: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("Expected 1 account, got %d", count)
+	if dbAccount.ID != account.ID {
+		t.Errorf("Expected account ID %s, got %s", account.ID, dbAccount.ID)
 	}
 
 	// Verify balance is 0
-	var balance int64
-	err = pool.QueryRow(ctx, "SELECT balance FROM accounts WHERE id=$1", account.ID).Scan(&balance)
-	if err != nil {
-		t.Fatalf("Failed to query account balance: %v", err)
-	}
-	if balance != 0 {
-		t.Errorf("Expected balance 0, got %d", balance)
+	if dbAccount.Balance != 0 {
+		t.Errorf("Expected balance 0, got %d", dbAccount.Balance)
 	}
 }
