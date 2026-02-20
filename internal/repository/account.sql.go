@@ -37,8 +37,8 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (p
 }
 
 const createUser = `-- name: CreateUser :one
-INSERT INTO users (id, username, email, created_at) 
-VALUES ($1, $2, $3, NOW()) 
+INSERT INTO users (id, username, email, role, created_at) 
+VALUES ($1, $2, $3, $4, NOW()) 
 RETURNING created_at
 `
 
@@ -46,10 +46,16 @@ type CreateUserParams struct {
 	ID       pgtype.UUID `db:"id" json:"id"`
 	Username string      `db:"username" json:"username"`
 	Email    string      `db:"email" json:"email"`
+	Role     string      `db:"role" json:"role"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (pgtype.Timestamp, error) {
-	row := q.db.QueryRow(ctx, createUser, arg.ID, arg.Username, arg.Email)
+	row := q.db.QueryRow(ctx, createUser,
+		arg.ID,
+		arg.Username,
+		arg.Email,
+		arg.Role,
+	)
 	var created_at pgtype.Timestamp
 	err := row.Scan(&created_at)
 	return created_at, err
@@ -173,25 +179,19 @@ func (q *Queries) GetEntries(ctx context.Context, arg GetEntriesParams) ([]Entry
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, username, email, created_at 
+SELECT id, username, email, role, created_at 
 FROM users 
 WHERE id = $1
 `
 
-type GetUserRow struct {
-	ID        pgtype.UUID      `db:"id" json:"id"`
-	Username  string           `db:"username" json:"username"`
-	Email     string           `db:"email" json:"email"`
-	CreatedAt pgtype.Timestamp `db:"created_at" json:"created_at"`
-}
-
-func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (GetUserRow, error) {
+func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
 	row := q.db.QueryRow(ctx, getUser, id)
-	var i GetUserRow
+	var i User
 	err := row.Scan(
 		&i.ID,
 		&i.Username,
 		&i.Email,
+		&i.Role,
 		&i.CreatedAt,
 	)
 	return i, err
