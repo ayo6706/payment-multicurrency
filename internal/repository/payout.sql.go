@@ -91,6 +91,49 @@ func (q *Queries) GetPendingPayouts(ctx context.Context, limit int32) ([]Payout,
 	return items, nil
 }
 
+const getStaleProcessingPayouts = `-- name: GetStaleProcessingPayouts :many
+SELECT id, transaction_id, account_id, amount_micros, currency, status, gateway_ref, created_at, updated_at FROM payouts
+WHERE status = 'PROCESSING' AND updated_at < $1
+ORDER BY updated_at ASC
+FOR UPDATE SKIP LOCKED
+LIMIT $2
+`
+
+type GetStaleProcessingPayoutsParams struct {
+	UpdatedAt pgtype.Timestamptz `db:"updated_at" json:"updated_at"`
+	Limit     int32              `db:"limit" json:"limit"`
+}
+
+func (q *Queries) GetStaleProcessingPayouts(ctx context.Context, arg GetStaleProcessingPayoutsParams) ([]Payout, error) {
+	rows, err := q.db.Query(ctx, getStaleProcessingPayouts, arg.UpdatedAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payout
+	for rows.Next() {
+		var i Payout
+		if err := rows.Scan(
+			&i.ID,
+			&i.TransactionID,
+			&i.AccountID,
+			&i.AmountMicros,
+			&i.Currency,
+			&i.Status,
+			&i.GatewayRef,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const insertPayout = `-- name: InsertPayout :one
 INSERT INTO payouts (id, transaction_id, account_id, amount_micros, currency, status, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())

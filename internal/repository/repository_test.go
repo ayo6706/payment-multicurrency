@@ -15,7 +15,7 @@ func init() {
 	_ = godotenv.Load("../../.env") // Load from root
 }
 
-func TestCreateUser_And_Account(t *testing.T) {
+func TestCreateUserAndAccount(t *testing.T) {
 	// Check if DB url is present (loaded from .env or system)
 	if os.Getenv("DATABASE_URL") == "" {
 		t.Skip("Skipping integration test: DATABASE_URL not set")

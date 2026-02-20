@@ -70,7 +70,9 @@ type IdempotencyKey struct {
 	ResponseStatus int32              `db:"response_status" json:"response_status"`
 	ResponseBody   []byte             `db:"response_body" json:"response_body"`
 	ContentType    string             `db:"content_type" json:"content_type"`
+	InProgress     bool               `db:"in_progress" json:"in_progress"`
 	CreatedAt      pgtype.Timestamptz `db:"created_at" json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `db:"updated_at" json:"updated_at"`
 }
 
 type Payout struct {

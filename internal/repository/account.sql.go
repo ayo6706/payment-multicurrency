@@ -228,3 +228,22 @@ func (q *Queries) ReleaseAccountFunds(ctx context.Context, arg ReleaseAccountFun
 	_, err := q.db.Exec(ctx, releaseAccountFunds, arg.LockedMicros, arg.ID)
 	return err
 }
+
+const releaseAccountFundsSafe = `-- name: ReleaseAccountFundsSafe :execrows
+UPDATE accounts
+SET locked_micros = locked_micros - $1
+WHERE id = $2 AND locked_micros >= $1
+`
+
+type ReleaseAccountFundsSafeParams struct {
+	LockedMicros int64       `db:"locked_micros" json:"locked_micros"`
+	ID           pgtype.UUID `db:"id" json:"id"`
+}
+
+func (q *Queries) ReleaseAccountFundsSafe(ctx context.Context, arg ReleaseAccountFundsSafeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseAccountFundsSafe, arg.LockedMicros, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
