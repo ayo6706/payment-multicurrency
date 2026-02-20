@@ -8,13 +8,28 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var JWTSecret = []byte("your-256-bit-secret-here") // In prod: os.Getenv("JWT_SECRET")
-
 type contextKey string
 
-const UserContextKey contextKey = "user_id"
+const (
+	userContextKey  contextKey = "user_id"
+	roleContextKey  contextKey = "user_role"
+	traceContextKey contextKey = "trace_id"
+)
 
-// AuthMiddleware validates the JWT token in the Authorization header.
+var jwtSecret = []byte("change-me")
+
+func SetJWTSecret(secret string) {
+	if secret == "" {
+		return
+	}
+	jwtSecret = []byte(secret)
+}
+
+func JWTSecret() []byte {
+	return jwtSecret
+}
+
+// AuthMiddleware validates the JWT token and injects user metadata into the context.
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -33,9 +48,8 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, http.ErrAbortHandler
 			}
-			return JWTSecret, nil
+			return jwtSecret, nil
 		})
-
 		if err != nil || !token.Valid {
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
@@ -47,13 +61,62 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		userID, ok := claims["user_id"].(string)
-		if !ok {
+		userID, _ := claims["user_id"].(string)
+		role, _ := claims["role"].(string)
+		if userID == "" {
 			http.Error(w, "Invalid user_id in token", http.StatusUnauthorized)
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), UserContextKey, userID)
+		ctx := context.WithValue(r.Context(), userContextKey, userID)
+		ctx = context.WithValue(ctx, roleContextKey, role)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// RequireRole ensures the authenticated user has the required role.
+func RequireRole(requiredRole string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			role := UserRoleFromContext(r.Context())
+			if role != requiredRole {
+				http.Error(w, "insufficient permissions", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// UserIDFromContext returns the authenticated user ID.
+func UserIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(userContextKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// UserRoleFromContext returns the role of the authenticated user.
+func UserRoleFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(roleContextKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// TraceIDFromContext returns the trace id for the request.
+func TraceIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(traceContextKey).(string); ok {
+		return v
+	}
+	return ""
 }
