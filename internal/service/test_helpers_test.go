@@ -7,9 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ayo6706/payment-multicurrency/internal/models"
-	"github.com/ayo6706/payment-multicurrency/internal/repository"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -110,18 +107,4 @@ func ensureLockedMicrosColumn(t *testing.T, db *pgxpool.Pool) {
 	if _, err := db.Exec(context.Background(), "ALTER TABLE accounts ADD COLUMN locked_micros BIGINT NOT NULL DEFAULT 0"); err != nil {
 		t.Fatalf("failed to add locked_micros column: %v", err)
 	}
-}
-
-func createTestUser(t *testing.T, repo *repository.Repository, username string) uuid.UUID {
-	t.Helper()
-
-	user := &models.User{
-		ID:       uuid.New(),
-		Username: username,
-		Email:    username + "@example.com",
-	}
-	if err := repo.CreateUser(context.Background(), user); err != nil {
-		t.Fatalf("failed to create user: %v", err)
-	}
-	return user.ID
 }
