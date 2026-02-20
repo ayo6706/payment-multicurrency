@@ -13,6 +13,13 @@ ORDER BY created_at ASC
 FOR UPDATE SKIP LOCKED 
 LIMIT $1;
 
+-- name: GetStaleProcessingPayouts :many
+SELECT * FROM payouts
+WHERE status = 'PROCESSING' AND updated_at < $1
+ORDER BY updated_at ASC
+FOR UPDATE SKIP LOCKED
+LIMIT $2;
+
 -- name: UpdatePayoutStatus :exec
 UPDATE payouts
 SET status = $1, gateway_ref = $2, updated_at = NOW()

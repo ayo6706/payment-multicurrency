@@ -35,6 +35,11 @@ UPDATE accounts
 SET locked_micros = locked_micros - $1
 WHERE id = $2;
 
+-- name: ReleaseAccountFundsSafe :execrows
+UPDATE accounts
+SET locked_micros = locked_micros - $1
+WHERE id = $2 AND locked_micros >= $1;
+
 -- name: DeductLockedFunds :exec
 UPDATE accounts
 SET locked_micros = locked_micros - $1, balance = balance - $1
