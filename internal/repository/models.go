@@ -62,6 +62,17 @@ type Entry struct {
 	CreatedAt     pgtype.Timestamp `db:"created_at" json:"created_at"`
 }
 
+type IdempotencyKey struct {
+	IdempotencyKey string             `db:"idempotency_key" json:"idempotency_key"`
+	RequestHash    string             `db:"request_hash" json:"request_hash"`
+	Method         string             `db:"method" json:"method"`
+	Path           string             `db:"path" json:"path"`
+	ResponseStatus int32              `db:"response_status" json:"response_status"`
+	ResponseBody   []byte             `db:"response_body" json:"response_body"`
+	ContentType    string             `db:"content_type" json:"content_type"`
+	CreatedAt      pgtype.Timestamptz `db:"created_at" json:"created_at"`
+}
+
 type Payout struct {
 	ID            pgtype.UUID        `db:"id" json:"id"`
 	TransactionID pgtype.UUID        `db:"transaction_id" json:"transaction_id"`

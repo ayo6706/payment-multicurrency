@@ -33,10 +33,14 @@ func FromPgUUID(id pgtype.UUID) uuid.UUID {
 }
 
 func (r *Repository) CreateUser(ctx context.Context, user *models.User) error {
+	if user.Role == "" {
+		user.Role = "user"
+	}
 	createdAt, err := r.queries.CreateUser(ctx, CreateUserParams{
 		ID:       ToPgUUID(user.ID),
 		Username: user.Username,
 		Email:    user.Email,
+		Role:     user.Role,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create user: %w", err)
@@ -69,6 +73,7 @@ func (r *Repository) GetUser(ctx context.Context, id uuid.UUID) (*models.User, e
 		ID:        FromPgUUID(row.ID),
 		Username:  row.Username,
 		Email:     row.Email,
+		Role:      row.Role,
 		CreatedAt: row.CreatedAt.Time,
 	}, nil
 }
