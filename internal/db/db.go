@@ -31,6 +31,7 @@ func Connect(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
 	}
 
 	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
 		return nil, fmt.Errorf("unable to connect to database: %w", err)
 	}
 

@@ -19,6 +19,12 @@ func NewAccountHandler(svc *service.AccountService) *AccountHandler {
 }
 
 func (h *AccountHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
+	actorID, isAdmin, err := requestActor(r)
+	if err != nil {
+		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
 	accountIDStr := chi.URLParam(r, "id")
 	accountID, err := uuid.Parse(accountIDStr)
 	if err != nil {
@@ -33,16 +39,37 @@ func (h *AccountHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to get balance: " + err.Error()})
 		return
 	}
+	if !isAdmin && account.UserID != actorID {
+		RespondError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(account)
 }
 
 func (h *AccountHandler) GetStatement(w http.ResponseWriter, r *http.Request) {
+	actorID, isAdmin, err := requestActor(r)
+	if err != nil {
+		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
 	accountIDStr := chi.URLParam(r, "id")
 	accountID, err := uuid.Parse(accountIDStr)
 	if err != nil {
 		http.Error(w, "Invalid account ID", http.StatusBadRequest)
+		return
+	}
+	account, err := h.svc.GetBalance(r.Context(), accountID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to authorize account access: " + err.Error()})
+		return
+	}
+	if !isAdmin && account.UserID != actorID {
+		RespondError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
 
@@ -65,6 +92,12 @@ func (h *AccountHandler) GetStatement(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AccountHandler) CreateAccount(w http.ResponseWriter, r *http.Request) {
+	actorID, isAdmin, err := requestActor(r)
+	if err != nil {
+		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
 	var req struct {
 		UserID   string `json:"user_id"`
 		Currency string `json:"currency"`
@@ -82,6 +115,10 @@ func (h *AccountHandler) CreateAccount(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid user_id"})
+		return
+	}
+	if !isAdmin && userID != actorID {
+		RespondError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
 

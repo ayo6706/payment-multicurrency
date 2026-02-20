@@ -57,9 +57,10 @@ func Run() error {
 
 	idemStore := idempotency.NewStore(redisClient, pool, cfg.IdempotencyTTL)
 	repo := repository.NewRepository(pool)
+	store := repository.NewStore(pool)
 
 	mockGateway := gateway.NewMockGateway()
-	payoutSvc := service.NewPayoutService(repo, pool, mockGateway)
+	payoutSvc := service.NewPayoutService(store, mockGateway)
 	payoutWorker := worker.NewPayoutWorker(payoutSvc)
 	payoutWorker.WithPollInterval(cfg.PayoutPollInterval)
 	payoutWorker.WithBatchSize(cfg.PayoutBatchSize)

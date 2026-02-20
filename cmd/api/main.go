@@ -1,13 +1,15 @@
 package main
 
 import (
-	"log"
+	"fmt"
+	"os"
 
 	"github.com/ayo6706/payment-multicurrency/internal/app"
 )
 
 func main() {
 	if err := app.Run(); err != nil {
-		log.Fatalf("application error: %v", err)
+		fmt.Fprintf(os.Stderr, "application error: %v\n", err)
+		os.Exit(1)
 	}
 }
