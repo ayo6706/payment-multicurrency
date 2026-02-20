@@ -21,7 +21,7 @@ func TestCreateUser_And_Account(t *testing.T) {
 		t.Skip("Skipping integration test: DATABASE_URL not set")
 	}
 
-	pool, err := db.Connect()
+	pool, err := db.Connect(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
 		t.Fatalf("Failed to connect to DB: %v", err)
 	}
