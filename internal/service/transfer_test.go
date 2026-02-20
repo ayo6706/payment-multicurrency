@@ -102,15 +102,13 @@ func TestTransfer(t *testing.T) {
 	require.NoError(t, err)
 
 	// 4. Verify Balances
-	var ayoBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", ayoAcc.ID).Scan(&ayoBalance)
+	ayoAccDb, err := repo.GetAccount(ctx, ayoAcc.ID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(50), ayoBalance) // Should be 50 after transfer
+	assert.Equal(t, int64(50), ayoAccDb.Balance) // Should be 50 after transfer
 
-	var davidBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", davidAcc.ID).Scan(&davidBalance)
+	davidAccDb, err := repo.GetAccount(ctx, davidAcc.ID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(50), davidBalance) // Should be 50 after transfer
+	assert.Equal(t, int64(50), davidAccDb.Balance) // Should be 50 after transfer
 }
 func TestTransferDeadlock(t *testing.T) {
 	db := setupTestDB(t)
@@ -162,15 +160,13 @@ func TestTransferDeadlock(t *testing.T) {
 	}
 
 	// 5. Verify Balances (should still be $100 each if n transfers each way)
-	var ayoBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", ayoAcc.ID).Scan(&ayoBalance)
+	ayoAccDb, err := repo.GetAccount(ctx, ayoAcc.ID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(100), ayoBalance)
+	assert.Equal(t, int64(100), ayoAccDb.Balance)
 
-	var davidBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", davidAcc.ID).Scan(&davidBalance)
+	davidAccDb, err := repo.GetAccount(ctx, davidAcc.ID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(100), davidBalance)
+	assert.Equal(t, int64(100), davidAccDb.Balance)
 }
 
 func TestTransferExchange(t *testing.T) {
@@ -238,28 +234,25 @@ func TestTransferExchange(t *testing.T) {
 
 	// 4. Verify Balances
 	// Ayo: 0 USD
-	var ayoBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", ayoAcc.ID).Scan(&ayoBalance)
+	ayoAccDb, err := repo.GetAccount(ctx, ayoAcc.ID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), ayoBalance)
+	assert.Equal(t, int64(0), ayoAccDb.Balance)
 
 	// David: 92 EUR (92_000_000 micros)
-	var davidBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1", davidAcc.ID).Scan(&davidBalance)
+	davidAccDb, err := repo.GetAccount(ctx, davidAcc.ID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(92_000_000), davidBalance)
+	assert.Equal(t, int64(92_000_000), davidAccDb.Balance)
 
 	// 5. Verify System Liquidity Balances (Using fixed IDs from migration 000003)
-	// System USD: +100 USD
-	var sysUSDBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = '22222222-2222-2222-2222-222222222222'").Scan(&sysUSDBalance)
+	sysUSDID, _ := uuid.Parse("22222222-2222-2222-2222-222222222222")
+	sysUSDDb, err := repo.GetAccount(ctx, sysUSDID)
 	require.NoError(t, err)
 	// Note: Initial balance was 0.
-	assert.Equal(t, int64(100_000_000), sysUSDBalance)
+	assert.Equal(t, int64(100_000_000), sysUSDDb.Balance)
 
 	// System EUR: -92 EUR
-	var sysEURBalance int64
-	err = db.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = '33333333-3333-3333-3333-333333333333'").Scan(&sysEURBalance)
+	sysEURID, _ := uuid.Parse("33333333-3333-3333-3333-333333333333")
+	sysEURDb, err := repo.GetAccount(ctx, sysEURID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(-92_000_000), sysEURBalance)
+	assert.Equal(t, int64(-92_000_000), sysEURDb.Balance)
 }
