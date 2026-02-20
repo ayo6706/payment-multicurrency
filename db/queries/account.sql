@@ -1,6 +1,6 @@
 -- name: CreateUser :one
-INSERT INTO users (id, username, email, created_at) 
-VALUES ($1, $2, $3, NOW()) 
+INSERT INTO users (id, username, email, role, created_at) 
+VALUES ($1, $2, $3, $4, NOW()) 
 RETURNING created_at;
 
 -- name: CreateAccount :one
@@ -21,7 +21,7 @@ ORDER BY created_at DESC
 LIMIT $2 OFFSET $3;
 
 -- name: GetUser :one
-SELECT id, username, email, created_at 
+SELECT id, username, email, role, created_at 
 FROM users 
 WHERE id = $1;
 
