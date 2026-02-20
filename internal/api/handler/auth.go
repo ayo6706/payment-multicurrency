@@ -6,15 +6,17 @@ import (
 	"time"
 
 	"github.com/ayo6706/payment-multicurrency/internal/api/middleware"
+	"github.com/ayo6706/payment-multicurrency/internal/repository"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
 
 type AuthHandler struct {
+	repo *repository.Repository
 }
 
-func NewAuthHandler() *AuthHandler {
-	return &AuthHandler{}
+func NewAuthHandler(repo *repository.Repository) *AuthHandler {
+	return &AuthHandler{repo: repo}
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
@@ -36,12 +38,21 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user, err := h.repo.GetUser(r.Context(), uid)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
+		return
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": uid.String(),
+		"role":    user.Role,
 		"exp":     time.Now().Add(24 * time.Hour).Unix(),
 	})
 
-	tokenString, err := token.SignedString(middleware.JWTSecret)
+	tokenString, err := token.SignedString(middleware.JWTSecret())
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)

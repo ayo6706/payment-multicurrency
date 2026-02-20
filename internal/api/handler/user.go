@@ -21,6 +21,7 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Email    string `json:"email"`
+		Role     string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -33,6 +34,7 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		ID:       uuid.New(),
 		Username: req.Username,
 		Email:    req.Email,
+		Role:     req.Role,
 	}
 	if err := h.repo.CreateUser(r.Context(), user); err != nil {
 		w.Header().Set("Content-Type", "application/json")

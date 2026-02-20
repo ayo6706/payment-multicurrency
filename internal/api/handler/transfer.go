@@ -3,13 +3,13 @@ package handler
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/ayo6706/payment-multicurrency/internal/models"
 	"github.com/ayo6706/payment-multicurrency/internal/service"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 type TransferHandler struct {
@@ -153,8 +153,7 @@ func (h *TransferHandler) MakeExchangeTransfer(w http.ResponseWriter, r *http.Re
 			return
 		}
 
-		// Log full error internally
-		log.Printf("Exchange failed: %v", err)
+		zap.L().Error("exchange transfer failed", zap.Error(err))
 
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Exchange failed"})

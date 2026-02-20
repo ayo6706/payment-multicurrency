@@ -3,13 +3,13 @@ package handler
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 
 	"github.com/ayo6706/payment-multicurrency/internal/models"
 	"github.com/ayo6706/payment-multicurrency/internal/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 // PayoutHandler handles HTTP requests for payouts.
@@ -89,7 +89,7 @@ func (h *PayoutHandler) CreatePayout(w http.ResponseWriter, r *http.Request) {
 			RespondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		log.Printf("Error creating payout: %v", err)
+		zap.L().Error("create payout failed", zap.Error(err))
 		RespondError(w, http.StatusInternalServerError, "Failed to create payout")
 		return
 	}
@@ -115,7 +115,7 @@ func (h *PayoutHandler) GetPayout(w http.ResponseWriter, r *http.Request) {
 			RespondError(w, http.StatusNotFound, "Payout not found")
 			return
 		}
-		log.Printf("Error getting payout: %v", err)
+		zap.L().Error("get payout failed", zap.Error(err), zap.String("payout_id", payoutID.String()))
 		RespondError(w, http.StatusInternalServerError, "Failed to get payout")
 		return
 	}
