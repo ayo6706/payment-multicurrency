@@ -180,17 +180,28 @@ Current approach:
 
 ## 7. Architecture and trade-offs
 
-See:
-- `docs/architecture.md` (design decisions + trade-offs)
+### Why this shape
+- Layered design (`api -> service -> repository`) to keep transport, business rules, and SQL concerns isolated.
+- Financial amounts are persisted as integer micros (`BIGINT`) end-to-end to avoid floating-point precision drift.
+- FX math uses `shopspring/decimal` and is converted back to integer micros before persistence.
+- Money movement writes double-entry ledger rows and account balance updates in the same DB transaction.
+- Critical state transitions are audited (`audit_log`) for traceability and post-incident reconstruction.
+
+### Consistency and failure handling decisions
+- Payment mutations (internal transfer, exchange, payout state/finalization, deposit webhook) run inside ACID transactions.
+- Account-level concurrency control is pessimistic (`SELECT ... FOR UPDATE`), with stable lock ordering to reduce deadlocks.
+- Payout workers claim work with `FOR UPDATE SKIP LOCKED` so multiple workers can scale safely without double processing.
+- Idempotency is two-layered: Redis for fast replay + PostgreSQL as authoritative source of truth.
+
+### Deliberately deferred due to scope/time
+- Broker-backed async pipeline (Kafka/RabbitMQ) for stronger decoupling between API acceptance and payout execution.
+- Outbox/inbox pattern for exactly-once side effects to external gateways.
+- More robust exchange-rate synchronization (scheduled refresh + staleness policy + provider failover/circuit breakers).
+- Adaptive/distributed rate limiting strategy (global limits, per-tenant quotas, abuse controls beyond fixed RPS).
+- Full reversal API (`REVERSED`) and broader authorization policy around operational interventions.
+
+For deeper detail see `docs/architecture.md`.
 
 Operational docs:
 - `docs/oncall-runbook.md`
 - `docs/failure-drills.md`
-
-## 8. What I would add with more time
-
-- Full reverse flow API (`REVERSED`) with authorization policy
-- Stronger secret management + key rotation strategy
-- Outbox pattern for external side effects
-- OpenTelemetry tracing + SLO dashboards/alerts
-- Multi-region disaster recovery runbook + automated drills
