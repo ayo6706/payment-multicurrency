@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ayo6706/payment-multicurrency/internal/domain"
 	"github.com/ayo6706/payment-multicurrency/internal/models"
 	"github.com/ayo6706/payment-multicurrency/internal/repository"
 	"github.com/google/uuid"
@@ -122,6 +123,20 @@ func TestTransfer(t *testing.T) {
 	amount := int64(50)
 	_, err = svc.Transfer(ctx, ayoAcc.ID, davidAcc.ID, amount, "ref-123")
 	require.NoError(t, err)
+	queries := repository.New(db)
+	txRow, err := queries.CheckTransactionIdempotency(ctx, "ref-123")
+	require.NoError(t, err)
+	require.Equal(t, domain.TxStatusCompleted, txRow.Status)
+	require.Equal(t, "USD", txRow.Currency)
+	auditRows, err := queries.GetAuditLogsByEntity(ctx, repository.GetAuditLogsByEntityParams{
+		EntityType: "transaction",
+		EntityID:   txRow.ID,
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(auditRows), 3)
+	require.Equal(t, "created", auditRows[0].Action)
+	require.Equal(t, "processing_started", auditRows[1].Action)
+	require.Equal(t, "completed", auditRows[2].Action)
 
 	// 4. Verify Balances
 	ayoAccDb, err := repo.GetAccount(ctx, ayoAcc.ID)
@@ -255,6 +270,19 @@ func TestTransferExchange(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "exchange", tx.Type)
 	assert.Equal(t, int64(100_000_000), tx.Amount)
+	queries := repository.New(db)
+	txRow, err := queries.CheckTransactionIdempotency(ctx, "ref-fx-123")
+	require.NoError(t, err)
+	require.Equal(t, domain.TxStatusCompleted, txRow.Status)
+	auditRows, err := queries.GetAuditLogsByEntity(ctx, repository.GetAuditLogsByEntityParams{
+		EntityType: "transaction",
+		EntityID:   txRow.ID,
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(auditRows), 3)
+	require.Equal(t, "created", auditRows[0].Action)
+	require.Equal(t, "processing_started", auditRows[1].Action)
+	require.Equal(t, "completed", auditRows[2].Action)
 
 	// 4. Verify Balances
 	// Ayo: 0 USD

@@ -2,23 +2,39 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ayo6706/payment-multicurrency/internal/domain"
 	"github.com/ayo6706/payment-multicurrency/internal/models"
-	"github.com/ayo6706/payment-multicurrency/internal/observability"
 	"github.com/ayo6706/payment-multicurrency/internal/repository"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
+)
+
+var (
+	// ErrInvalidAmount indicates a non-positive transfer amount.
+	ErrInvalidAmount = errors.New("amount must be greater than zero")
+	// ErrReferenceRequired indicates a missing idempotency reference.
+	ErrReferenceRequired = errors.New("reference_id is required")
+	// ErrSameAccountTransfer indicates source and destination are the same account.
+	ErrSameAccountTransfer = errors.New("cannot transfer to the same account")
+	// ErrCurrencyMismatch indicates source and destination account currencies differ.
+	ErrCurrencyMismatch = errors.New("currency mismatch")
+	// ErrSameCurrencyExchange indicates exchange request currencies are identical.
+	ErrSameCurrencyExchange = errors.New("source and target currency must be different")
 )
 
 // TransferService handles business logic for account transfers and exchanges.
 type TransferService struct {
 	store   QueryStore
 	fxRates ExchangeRateService
+	audit   *AuditService
 }
 
 // NewTransferService creates a new TransferService instance.
@@ -26,6 +42,7 @@ func NewTransferService(store QueryStore, fxRates ExchangeRateService) *Transfer
 	return &TransferService{
 		store:   store,
 		fxRates: fxRates,
+		audit:   NewAuditService(store),
 	}
 }
 
@@ -34,29 +51,20 @@ func NewTransferService(store QueryStore, fxRates ExchangeRateService) *Transfer
 // balance validation, transaction creation, and ledger entry creation.
 func (s *TransferService) Transfer(ctx context.Context, fromAccountID, toAccountID uuid.UUID, amount int64, referenceID string) (*models.Transaction, error) {
 	if amount <= 0 {
-		return nil, fmt.Errorf("invalid amount: %d", amount)
+		return nil, ErrInvalidAmount
 	}
 	if referenceID == "" {
-		return nil, errors.New("reference_id is required")
+		return nil, ErrReferenceRequired
 	}
 	if fromAccountID == toAccountID {
-		return nil, errors.New("cannot transfer to the same account")
+		return nil, ErrSameAccountTransfer
 	}
 
 	queries := s.store.Queries()
 
-	// 0. Check Idempotency (simplistic check)
 	existingTxRow, err := queries.CheckTransactionIdempotency(ctx, referenceID)
 	if err == nil {
-		return &models.Transaction{
-			ID:          repository.FromPgUUID(existingTxRow.ID),
-			Amount:      existingTxRow.Amount,
-			Currency:    existingTxRow.Currency,
-			Type:        existingTxRow.Type,
-			Status:      existingTxRow.Status,
-			ReferenceID: existingTxRow.ReferenceID,
-			// CreatedAt: existingTxRow.CreatedAt.Time,
-		}, nil
+		return mapExistingTransaction(existingTxRow), nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("failed to check idempotency: %w", err)
@@ -65,37 +73,21 @@ func (s *TransferService) Transfer(ctx context.Context, fromAccountID, toAccount
 	transactionID := uuid.New()
 	txCurrency := ""
 	err = s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
-		// 1. Lock accounts in a consistent order to prevent deadlocks
+		// Lock accounts in a stable order to reduce deadlock risk.
 		account1ID, account2ID := fromAccountID, toAccountID
 		if account1ID.String() > account2ID.String() {
 			account1ID, account2ID = toAccountID, fromAccountID
 		}
 
-		if fromAccountID == account1ID {
-			// Lock Sender first
-			_, err = qtx.LockAccount(ctx, repository.ToPgUUID(account1ID))
-			if err != nil {
-				return fmt.Errorf("failed to lock sender account: %w", err)
-			}
-			// Lock Receiver
-			_, err = qtx.LockAccount(ctx, repository.ToPgUUID(account2ID))
-			if err != nil {
-				return fmt.Errorf("failed to lock receiver account: %w", err)
-			}
-		} else {
-			// Lock Receiver first
-			_, err = qtx.LockAccount(ctx, repository.ToPgUUID(account1ID))
-			if err != nil {
-				return fmt.Errorf("failed to lock receiver account: %w", err)
-			}
-			// Lock Sender
-			_, err = qtx.LockAccount(ctx, repository.ToPgUUID(account2ID))
-			if err != nil {
-				return fmt.Errorf("failed to lock sender account: %w", err)
-			}
+		_, err = qtx.LockAccount(ctx, repository.ToPgUUID(account1ID))
+		if err != nil {
+			return fmt.Errorf("failed to lock account %s: %w", account1ID, err)
+		}
+		_, err = qtx.LockAccount(ctx, repository.ToPgUUID(account2ID))
+		if err != nil {
+			return fmt.Errorf("failed to lock account %s: %w", account2ID, err)
 		}
 
-		// 1.5 Fetch Account Details & Validate
 		fromAccRow, err := qtx.GetAccountBalanceAndCurrency(ctx, repository.ToPgUUID(fromAccountID))
 		if err != nil {
 			return fmt.Errorf("failed to fetch sender account: %w", err)
@@ -109,27 +101,31 @@ func (s *TransferService) Transfer(ctx context.Context, fromAccountID, toAccount
 		}
 
 		if fromCurrency != toCurrency {
-			return fmt.Errorf("currency mismatch: sender is %s, receiver is %s", fromCurrency, toCurrency)
+			return fmt.Errorf("%w: sender is %s, receiver is %s", ErrCurrencyMismatch, fromCurrency, toCurrency)
 		}
 
 		if fromBalance < amount {
 			return models.ErrInsufficientFunds
 		}
 
-		// 2. Create Transaction Record
 		_, err = qtx.CreateTransaction(ctx, repository.CreateTransactionParams{
 			ID:          repository.ToPgUUID(transactionID),
 			Amount:      amount,
-			Currency:    fromCurrency,
+			Currency:    txCurrency,
 			Type:        domain.TxTypeTransfer,
-			Status:      domain.TxStatusCompleted,
+			Status:      domain.TxStatusPending,
 			ReferenceID: referenceID,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create transaction: %w", err)
 		}
+		if err := s.audit.Write(ctx, qtx, "transaction", transactionID, nil, "created", "", domain.TxStatusPending, nil); err != nil {
+			return err
+		}
+		if err := transitionTransactionState(ctx, qtx, s.audit, transactionID, domain.TxStatusProcessing, nil, "processing_started", nil); err != nil {
+			return fmt.Errorf("failed to transition transaction to processing: %w", err)
+		}
 
-		// 3. Create Double Entries
 		_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
 			ID:            repository.ToPgUUID(uuid.New()),
 			TransactionID: repository.ToPgUUID(transactionID),
@@ -152,31 +148,39 @@ func (s *TransferService) Transfer(ctx context.Context, fromAccountID, toAccount
 			return fmt.Errorf("failed to create receiver ledger entry: %w", err)
 		}
 
-		// 4. Update Balances
-		err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		rows, err := qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
 			Balance: -amount,
 			ID:      repository.ToPgUUID(fromAccountID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to update sender balance: %w", err)
 		}
+		if err := requireExactlyOne(rows, "debit sender account"); err != nil {
+			return err
+		}
 
-		err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		rows, err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
 			Balance: amount,
 			ID:      repository.ToPgUUID(toAccountID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to update receiver balance: %w", err)
 		}
-
-		balanceAudit := map[string]int64{}
-		balanceAudit[fromCurrency] -= amount
-		balanceAudit[fromCurrency] += amount
-		auditLedgerBalances(balanceAudit)
-
+		if err := requireExactlyOne(rows, "credit receiver account"); err != nil {
+			return err
+		}
+		if err := transitionTransactionState(ctx, qtx, s.audit, transactionID, domain.TxStatusCompleted, nil, "completed", nil); err != nil {
+			return fmt.Errorf("failed to complete transaction: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
+		if isUniqueViolation(err) {
+			existing, lookupErr := queries.CheckTransactionIdempotency(ctx, referenceID)
+			if lookupErr == nil {
+				return mapExistingTransaction(existing), nil
+			}
+		}
 		return nil, err
 	}
 
@@ -205,16 +209,16 @@ type TransferExchangeCmd struct {
 // balance valuation, foreign exchange, and entry logging.
 func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExchangeCmd) (*models.Transaction, error) {
 	if cmd.Amount <= 0 {
-		return nil, fmt.Errorf("invalid amount: %d", cmd.Amount)
+		return nil, ErrInvalidAmount
 	}
 	if cmd.ReferenceID == "" {
-		return nil, errors.New("reference_id is required")
+		return nil, ErrReferenceRequired
 	}
 	if cmd.FromAccountID == cmd.ToAccountID {
-		return nil, errors.New("cannot transfer to the same account")
+		return nil, ErrSameAccountTransfer
 	}
 	if cmd.FromCurrency == cmd.ToCurrency {
-		return nil, errors.New("source and target currency must be different")
+		return nil, ErrSameCurrencyExchange
 	}
 
 	queries := s.store.Queries()
@@ -222,28 +226,7 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 	// 0. Check Idempotency
 	existingTxRow, err := queries.CheckTransactionIdempotency(ctx, cmd.ReferenceID)
 	if err == nil {
-		var fxRate *decimal.Decimal
-		if existingTxRow.FxRate.Valid {
-			// Convert pgtype.Numeric back to decimal.Decimal or string if model.Transaction uses string.
-			// Models uses *decimal.Decimal for FxRate. Let's parse the pgtype.Numeric.
-			strVal, _ := existingTxRow.FxRate.Value()
-			s := fmt.Sprintf("%v", strVal)
-			dec, err := decimal.NewFromString(s)
-			if err == nil {
-				fxRate = &dec
-			}
-		}
-
-		return &models.Transaction{
-			ID:          repository.FromPgUUID(existingTxRow.ID),
-			Amount:      existingTxRow.Amount,
-			Currency:    existingTxRow.Currency,
-			Type:        existingTxRow.Type,
-			Status:      existingTxRow.Status,
-			ReferenceID: existingTxRow.ReferenceID,
-			FXRate:      fxRate,
-			// CreatedAt: existingTxRow.CreatedAt.Time,
-		}, nil
+		return mapExistingTransaction(existingTxRow), nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("failed to check idempotency: %w", err)
@@ -265,23 +248,12 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 		return nil, fmt.Errorf("failed to identify liquidity target account: %w", err)
 	}
 
-	// 3. Begin Transaction
 	transactionID := uuid.New()
 	fxRateVar := rate
-	err = s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
-		// 4. Lock Accounts (Lock all 4 accounts involved)
-		// Order: FromUser, LiqSource, LiqTarget, ToUser -> Sorted by ID
-		accountIDs := []uuid.UUID{cmd.FromAccountID, liqSourceID, liqTargetID, cmd.ToAccountID}
-		// Sort IDs
-		for i := 0; i < len(accountIDs); i++ {
-			for j := i + 1; j < len(accountIDs); j++ {
-				if accountIDs[i].String() > accountIDs[j].String() {
-					accountIDs[i], accountIDs[j] = accountIDs[j], accountIDs[i]
-				}
-			}
-		}
 
-		// Lock loop
+	err = s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
+		accountIDs := dedupeUUIDs(cmd.FromAccountID, liqSourceID, liqTargetID, cmd.ToAccountID)
+		sortUUIDs(accountIDs)
 		for _, id := range accountIDs {
 			_, err := qtx.LockAccount(ctx, repository.ToPgUUID(id))
 			if err != nil {
@@ -292,9 +264,6 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 			}
 		}
 
-		// Lock Phase Complete
-
-		// 5. Check Balances and Currencies
 		fromAccRow, err := qtx.GetAccountBalanceAndCurrency(ctx, repository.ToPgUUID(cmd.FromAccountID))
 		if err != nil {
 			return fmt.Errorf("failed to fetch sender account: %w", err)
@@ -318,40 +287,57 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 			return models.ErrInsufficientFunds
 		}
 
-		// 6. Calculate Amounts
+		_, err = qtx.CreateTransaction(ctx, repository.CreateTransactionParams{
+			ID:          repository.ToPgUUID(transactionID),
+			Amount:      cmd.Amount,
+			Currency:    cmd.FromCurrency,
+			Type:        domain.TxTypeExchange,
+			Status:      domain.TxStatusPending,
+			ReferenceID: cmd.ReferenceID,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create transaction: %w", err)
+		}
+		if err := s.audit.Write(ctx, qtx, "transaction", transactionID, nil, "created", "", domain.TxStatusPending, nil); err != nil {
+			return err
+		}
+		if err := transitionTransactionState(ctx, qtx, s.audit, transactionID, domain.TxStatusProcessing, nil, "processing_started", nil); err != nil {
+			return fmt.Errorf("failed to transition transaction to processing: %w", err)
+		}
+
 		sourceMoney := domain.NewMoney(cmd.Amount, cmd.FromCurrency)
-		targetMoney := sourceMoney.Convert(cmd.ToCurrency, rate) // Convert uses rate (Target/Source)
+		targetMoney := sourceMoney.Convert(cmd.ToCurrency, rate)
 
 		amountSource := sourceMoney.Amount
 		amountTarget := targetMoney.Amount
 
-		// 7. Create Transaction Record
-		// pass fx rate to numeric
 		var numericFxRate pgtype.Numeric
 		err = numericFxRate.Scan(rate.String())
 		if err != nil {
 			return fmt.Errorf("failed to parse fx rate: %w", err)
 		}
 
-		metadataJson := []byte(fmt.Sprintf(`{"from_currency": "%s", "to_currency": "%s", "target_amount": %d}`, cmd.FromCurrency, cmd.ToCurrency, amountTarget))
-
-		_, err = qtx.CreateTransaction(ctx, repository.CreateTransactionParams{
-			ID:          repository.ToPgUUID(transactionID),
-			Amount:      amountSource,
-			Currency:    cmd.FromCurrency,
-			Type:        domain.TxTypeExchange,
-			Status:      domain.TxStatusCompleted,
-			ReferenceID: cmd.ReferenceID,
-			FxRate:      numericFxRate,
-			Metadata:    metadataJson,
+		metadataJson, err := json.Marshal(map[string]any{
+			"from_currency": cmd.FromCurrency,
+			"to_currency":   cmd.ToCurrency,
+			"target_amount": amountTarget,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to create transaction: %w", err)
+			return fmt.Errorf("failed to encode exchange metadata: %w", err)
 		}
 
-		// 8. Create 4 Ledger Entries
+		rows, err := qtx.UpdateTransactionFx(ctx, repository.UpdateTransactionFxParams{
+			FxRate:   numericFxRate,
+			Metadata: metadataJson,
+			ID:       repository.ToPgUUID(transactionID),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to update transaction fx metadata: %w", err)
+		}
+		if err := requireExactlyOne(rows, "update transaction fx metadata"); err != nil {
+			return err
+		}
 
-		// Entry 1: Debit User (Source Currency)
 		_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
 			ID:            repository.ToPgUUID(uuid.New()),
 			TransactionID: repository.ToPgUUID(transactionID),
@@ -363,7 +349,6 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 			return fmt.Errorf("failed to log user debit entry: %w", err)
 		}
 
-		// Entry 2: Credit Liquidity (Source Currency)
 		_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
 			ID:            repository.ToPgUUID(uuid.New()),
 			TransactionID: repository.ToPgUUID(transactionID),
@@ -375,7 +360,6 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 			return err
 		}
 
-		// Entry 3: Debit Liquidity (Target Currency)
 		_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
 			ID:            repository.ToPgUUID(uuid.New()),
 			TransactionID: repository.ToPgUUID(transactionID),
@@ -387,7 +371,6 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 			return err
 		}
 
-		// Entry 4: Credit User (Target Currency)
 		_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
 			ID:            repository.ToPgUUID(uuid.New()),
 			TransactionID: repository.ToPgUUID(transactionID),
@@ -399,50 +382,58 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 			return err
 		}
 
-		// 9. Update Balances
-		// User Source Debit
-		err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		rows, err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
 			Balance: -amountSource,
 			ID:      repository.ToPgUUID(cmd.FromAccountID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to debit user account: %w", err)
 		}
-		// Liquidity Source Credit
-		err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		if err := requireExactlyOne(rows, "debit source account"); err != nil {
+			return err
+		}
+		rows, err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
 			Balance: amountSource,
 			ID:      repository.ToPgUUID(liqSourceID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to credit liquidity source: %w", err)
 		}
-		// Liquidity Target Debit
-		err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		if err := requireExactlyOne(rows, "credit source liquidity account"); err != nil {
+			return err
+		}
+		rows, err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
 			Balance: -amountTarget,
 			ID:      repository.ToPgUUID(liqTargetID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to debit liquidity target: %w", err)
 		}
-		// User Target Credit
-		err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		if err := requireExactlyOne(rows, "debit target liquidity account"); err != nil {
+			return err
+		}
+		rows, err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
 			Balance: amountTarget,
 			ID:      repository.ToPgUUID(cmd.ToAccountID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to credit user account: %w", err)
 		}
-
-		fxAudit := map[string]int64{}
-		fxAudit[cmd.FromCurrency] -= amountSource
-		fxAudit[cmd.FromCurrency] += amountSource
-		fxAudit[cmd.ToCurrency] -= amountTarget
-		fxAudit[cmd.ToCurrency] += amountTarget
-		auditLedgerBalances(fxAudit)
-
+		if err := requireExactlyOne(rows, "credit destination account"); err != nil {
+			return err
+		}
+		if err := transitionTransactionState(ctx, qtx, s.audit, transactionID, domain.TxStatusCompleted, nil, "completed", nil); err != nil {
+			return fmt.Errorf("failed to complete exchange transaction: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
+		if isUniqueViolation(err) {
+			existing, lookupErr := queries.CheckTransactionIdempotency(ctx, cmd.ReferenceID)
+			if lookupErr == nil {
+				return mapExistingTransaction(existing), nil
+			}
+		}
 		return nil, err
 	}
 
@@ -458,24 +449,64 @@ func (s *TransferService) TransferExchange(ctx context.Context, cmd TransferExch
 }
 
 func getSystemAccountID(currency string) (uuid.UUID, error) {
-	var idStr string
-	switch currency {
+	switch strings.ToUpper(strings.TrimSpace(currency)) {
 	case "USD":
-		idStr = domain.SystemAccountUSD
+		return uuid.Parse(domain.SystemAccountUSD)
 	case "EUR":
-		idStr = domain.SystemAccountEUR
+		return uuid.Parse(domain.SystemAccountEUR)
 	case "GBP":
-		idStr = domain.SystemAccountGBP
+		return uuid.Parse(domain.SystemAccountGBP)
 	default:
 		return uuid.Nil, fmt.Errorf("unsupported currency for system liquidity: %s", currency)
 	}
-	return uuid.Parse(idStr)
 }
 
-func auditLedgerBalances(balances map[string]int64) {
-	for currency, sum := range balances {
-		if sum != 0 {
-			observability.IncrementLedgerImbalance(currency)
+func mapExistingTransaction(row repository.CheckTransactionIdempotencyRow) *models.Transaction {
+	var fxRate *decimal.Decimal
+	if row.FxRate.Valid {
+		val, err := row.FxRate.Value()
+		if err == nil {
+			dec, parseErr := decimal.NewFromString(fmt.Sprintf("%v", val))
+			if parseErr == nil {
+				fxRate = &dec
+			}
 		}
 	}
+	return &models.Transaction{
+		ID:          repository.FromPgUUID(row.ID),
+		Amount:      row.Amount,
+		Currency:    row.Currency,
+		Type:        row.Type,
+		Status:      row.Status,
+		ReferenceID: row.ReferenceID,
+		FXRate:      fxRate,
+	}
+}
+
+func sortUUIDs(ids []uuid.UUID) {
+	for i := 0; i < len(ids); i++ {
+		for j := i + 1; j < len(ids); j++ {
+			if ids[i].String() > ids[j].String() {
+				ids[i], ids[j] = ids[j], ids[i]
+			}
+		}
+	}
+}
+
+func dedupeUUIDs(ids ...uuid.UUID) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
