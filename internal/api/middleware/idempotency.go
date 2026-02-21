@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/ayo6706/payment-multicurrency/internal/api/problem"
 	"github.com/ayo6706/payment-multicurrency/internal/idempotency"
+	"github.com/ayo6706/payment-multicurrency/internal/observability"
 	"go.uber.org/zap"
 )
 
@@ -30,13 +32,14 @@ func IdempotencyMiddleware(store *idempotency.Store, logger *zap.Logger) func(ht
 
 			key := r.Header.Get("Idempotency-Key")
 			if key == "" {
-				http.Error(w, "Idempotency-Key header is required", http.StatusBadRequest)
+				observability.IncrementIdempotencyEvent("missing_key")
+				problem.Write(w, r, http.StatusBadRequest, problem.Type("idempotency/missing-key"), http.StatusText(http.StatusBadRequest), "Idempotency-Key header is required")
 				return
 			}
 
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
-				http.Error(w, "Failed to read request body", http.StatusBadRequest)
+				problem.Write(w, r, http.StatusBadRequest, problem.Type("request/invalid-body"), http.StatusText(http.StatusBadRequest), "Failed to read request body")
 				return
 			}
 			_ = r.Body.Close()
@@ -45,43 +48,52 @@ func IdempotencyMiddleware(store *idempotency.Store, logger *zap.Logger) func(ht
 			reqHash := hashRequest(r.Method, r.URL.Path, bodyBytes)
 			rec, err := store.Lookup(r.Context(), key, reqHash)
 			if err == nil {
+				observability.IncrementIdempotencyEvent("replay")
 				respondFromRecord(w, rec)
 				return
 			}
 			if errors.Is(err, idempotency.ErrHashMismatch) {
-				http.Error(w, "conflicting idempotency key", http.StatusConflict)
+				observability.IncrementIdempotencyEvent("hash_mismatch")
+				problem.Write(w, r, http.StatusConflict, problem.Type("idempotency/key-conflict"), http.StatusText(http.StatusConflict), "conflicting idempotency key")
 				return
 			}
 			if errors.Is(err, idempotency.ErrInProgress) {
 				rec, waitErr := store.WaitForCompletion(r.Context(), key, reqHash)
 				if waitErr == nil {
+					observability.IncrementIdempotencyEvent("replay_after_wait")
 					respondFromRecord(w, rec)
 					return
 				}
+				observability.IncrementIdempotencyEvent("in_progress_conflict")
 				logger.Warn("idempotency wait failed", zap.Error(waitErr))
-				http.Error(w, "idempotency processing", http.StatusConflict)
+				problem.Write(w, r, http.StatusConflict, problem.Type("idempotency/in-progress"), http.StatusText(http.StatusConflict), "idempotency processing")
 				return
 			}
 			if err != idempotency.ErrNotFound {
+				observability.IncrementIdempotencyEvent("lookup_error")
 				logger.Warn("idempotency lookup failed", zap.Error(err))
 			}
 
 			reserved, err := store.Reserve(r.Context(), key, reqHash, r.Method, r.URL.Path)
 			if err != nil {
+				observability.IncrementIdempotencyEvent("reserve_error")
 				logger.Error("idempotency reserve failed", zap.Error(err))
-				http.Error(w, "idempotency unavailable", http.StatusInternalServerError)
+				problem.Write(w, r, http.StatusInternalServerError, problem.Type("idempotency/unavailable"), http.StatusText(http.StatusInternalServerError), "idempotency unavailable")
 				return
 			}
 			if !reserved {
 				rec, waitErr := store.WaitForCompletion(r.Context(), key, reqHash)
 				if waitErr == nil {
+					observability.IncrementIdempotencyEvent("replay_after_reserve")
 					respondFromRecord(w, rec)
 					return
 				}
+				observability.IncrementIdempotencyEvent("in_progress_conflict")
 				logger.Warn("idempotency wait failed", zap.Error(waitErr))
-				http.Error(w, "idempotency processing", http.StatusConflict)
+				problem.Write(w, r, http.StatusConflict, problem.Type("idempotency/in-progress"), http.StatusText(http.StatusConflict), "idempotency processing")
 				return
 			}
+			observability.IncrementIdempotencyEvent("reserved")
 
 			recorder := &bodyRecorder{ResponseWriter: w}
 			next.ServeHTTP(recorder, r)
@@ -96,7 +108,10 @@ func IdempotencyMiddleware(store *idempotency.Store, logger *zap.Logger) func(ht
 			}
 
 			if _, err := store.Finalize(r.Context(), key, reqHash, recorder.status, recorder.body.Bytes(), contentType); err != nil {
+				observability.IncrementIdempotencyEvent("finalize_error")
 				logger.Warn("idempotency finalize failed", zap.Error(err), zap.String("key", key))
+			} else {
+				observability.IncrementIdempotencyEvent("finalized")
 			}
 		})
 	}
