@@ -1,0 +1,593 @@
+openapi: 3.0.3
+info:
+  title: Payment Multicurrency API
+  version: "1.0.0"
+  description: Fintech payment processing API for accounts, transfers, payouts, and webhooks.
+servers:
+  - url: /
+tags:
+  - name: Auth
+  - name: Users
+  - name: Accounts
+  - name: Transfers
+  - name: Payouts
+  - name: Webhooks
+  - name: Ops
+paths:
+  /v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login with user ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+      responses:
+        "200":
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+        "400":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /v1/users:
+    post:
+      tags: [Users]
+      summary: Create user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email]
+              properties:
+                username:
+                  type: string
+                email:
+                  type: string
+                  format: email
+      responses:
+        "201":
+          description: Created user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/accounts:
+    post:
+      tags: [Accounts]
+      summary: Create account
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, currency, balance]
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+                currency:
+                  type: string
+                  enum: [USD, EUR, GBP]
+                balance:
+                  type: integer
+                  format: int64
+      responses:
+        "201":
+          description: Created account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+  /v1/accounts/{id}/balance:
+    get:
+      tags: [Accounts]
+      summary: Get account balance
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Account balance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  account_id:
+                    type: string
+                    format: uuid
+                  currency:
+                    type: string
+                  balance:
+                    type: integer
+                    format: int64
+                  locked_micros:
+                    type: integer
+                    format: int64
+                  available_micros:
+                    type: integer
+                    format: int64
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /v1/accounts/{id}/statement:
+    get:
+      tags: [Accounts]
+      summary: Get account statement
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: page_size
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Statement entries
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+  /v1/transfers/internal:
+    post:
+      tags: [Transfers]
+      summary: Internal transfer
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_account_id, to_account_id, amount]
+              properties:
+                from_account_id:
+                  type: string
+                  format: uuid
+                to_account_id:
+                  type: string
+                  format: uuid
+                amount:
+                  type: integer
+                  format: int64
+      responses:
+        "201":
+          description: Transfer completed
+          content:
+            application/json:
+              schema:
+                type: object
+        "200":
+          description: Idempotent replay result
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/transfers/exchange:
+    post:
+      tags: [Transfers]
+      summary: FX exchange transfer
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_account_id, to_account_id, amount, from_currency, to_currency]
+              properties:
+                from_account_id:
+                  type: string
+                  format: uuid
+                to_account_id:
+                  type: string
+                  format: uuid
+                amount:
+                  type: integer
+                  format: int64
+                from_currency:
+                  type: string
+                  enum: [USD, EUR, GBP]
+                to_currency:
+                  type: string
+                  enum: [USD, EUR, GBP]
+      responses:
+        "201":
+          description: FX transfer completed
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+  /v1/payouts:
+    post:
+      tags: [Payouts]
+      summary: Create payout (admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account_id, amount_micros, currency, destination]
+              properties:
+                account_id:
+                  type: string
+                  format: uuid
+                amount_micros:
+                  type: integer
+                  format: int64
+                currency:
+                  type: string
+                  enum: [USD, EUR, GBP]
+                destination:
+                  type: object
+                  required: [iban, name]
+                  properties:
+                    iban:
+                      type: string
+                    name:
+                      type: string
+      responses:
+        "202":
+          description: Payout queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PayoutQueueResponse"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+  /v1/payouts/{id}:
+    get:
+      tags: [Payouts]
+      summary: Get payout status
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Payout
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payout"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /v1/payouts/manual-review:
+    get:
+      tags: [Payouts]
+      summary: List manual-review payouts (admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Manual review queue
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+  /v1/payouts/{id}/resolve:
+    post:
+      tags: [Payouts]
+      summary: Resolve manual-review payout (admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, reason]
+              properties:
+                decision:
+                  type: string
+                  enum: [confirm_sent, refund_failed]
+                reason:
+                  type: string
+                gateway_ref:
+                  type: string
+      responses:
+        "200":
+          description: Updated payout
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payout"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/webhooks/deposit:
+    post:
+      tags: [Webhooks]
+      summary: Receive deposit webhook
+      parameters:
+        - in: header
+          name: X-Webhook-Signature
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account_id, amount_micros, currency, reference]
+              properties:
+                account_id:
+                  type: string
+                  format: uuid
+                amount_micros:
+                  type: integer
+                  format: int64
+                currency:
+                  type: string
+                  enum: [USD, EUR, GBP]
+                reference:
+                  type: string
+      responses:
+        "200":
+          description: Deposit processed
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /health/live:
+    get:
+      tags: [Ops]
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Service alive
+  /health/ready:
+    get:
+      tags: [Ops]
+      summary: Readiness probe
+      responses:
+        "200":
+          description: Service ready
+        "503":
+          $ref: "#/components/responses/Problem"
+  /metrics:
+    get:
+      tags: [Ops]
+      summary: Prometheus metrics
+      responses:
+        "200":
+          description: Metrics text output
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    Problem:
+      description: RFC 7807 problem details
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        currency:
+          type: string
+        balance:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+    Payout:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        transaction_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        amount_micros:
+          type: integer
+          format: int64
+        currency:
+          type: string
+        status:
+          type: string
+        gateway_ref:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PayoutQueueResponse:
+      type: object
+      properties:
+        payout_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        message:
+          type: string
+    Problem:
+      type: object
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        request_id:
+          type: string
