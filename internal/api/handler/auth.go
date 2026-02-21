@@ -24,39 +24,37 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		UserID string `json:"user_id"` // Mock login by UserID
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-body", "Invalid request body")
 		return
 	}
 
 	uid, err := uuid.Parse(req.UserID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid user_id"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-user-id", "Invalid user_id")
 		return
 	}
 
 	user, err := h.repo.GetUser(r.Context(), uid)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
+		RespondError(w, r, http.StatusNotFound, "auth/user-not-found", "User not found")
 		return
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": uid.String(),
 		"role":    user.Role,
+		"iss":     middleware.JWTIssuer(),
+		"aud":     middleware.JWTAudience(),
+		"sub":     uid.String(),
+		"iat":     time.Now().Unix(),
+		"nbf":     time.Now().Add(-30 * time.Second).Unix(),
 		"exp":     time.Now().Add(24 * time.Hour).Unix(),
+		"jti":     uuid.NewString(),
 	})
 
 	tokenString, err := token.SignedString(middleware.JWTSecret())
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to sign token"})
+		RespondError(w, r, http.StatusInternalServerError, "auth/token-sign-failed", "Failed to sign token")
 		return
 	}
 
