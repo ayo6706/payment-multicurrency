@@ -7,6 +7,7 @@ import (
 	"github.com/ayo6706/payment-multicurrency/internal/models"
 	"github.com/ayo6706/payment-multicurrency/internal/repository"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 type UserHandler struct {
@@ -23,9 +24,7 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-body", "Invalid request body")
 		return
 	}
 
@@ -36,9 +35,12 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Role:     "user",
 	}
 	if err := h.repo.CreateUser(r.Context(), user); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create user: " + err.Error()})
+		if status, pType, msg, ok := mapDBError(err); ok {
+			RespondError(w, r, status, pType, msg)
+			return
+		}
+		zap.L().Error("create user failed", zap.Error(err), zap.String("email", req.Email))
+		RespondError(w, r, http.StatusInternalServerError, "user/create-failed", "Failed to create user")
 		return
 	}
 
