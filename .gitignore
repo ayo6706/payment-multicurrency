@@ -8,12 +8,6 @@
 dist/
 bin/
 
-# Agent
-.agent/
-.cortex/
-.gemini/
-.specs/
-
 # IDEs
 .vscode/
 .idea/
