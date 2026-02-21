@@ -11,6 +11,18 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countPayoutsByStatus = `-- name: CountPayoutsByStatus :one
+SELECT COUNT(*)::bigint FROM payouts
+WHERE status = $1
+`
+
+func (q *Queries) CountPayoutsByStatus(ctx context.Context, status string) (int64, error) {
+	row := q.db.QueryRow(ctx, countPayoutsByStatus, status)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const getPayout = `-- name: GetPayout :one
 SELECT id, transaction_id, account_id, amount_micros, currency, status, gateway_ref, created_at, updated_at FROM payouts WHERE id = $1
 `
@@ -51,6 +63,70 @@ func (q *Queries) GetPayoutByTransactionID(ctx context.Context, transactionID pg
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getPayoutForUpdate = `-- name: GetPayoutForUpdate :one
+SELECT id, transaction_id, account_id, amount_micros, currency, status, gateway_ref, created_at, updated_at FROM payouts WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetPayoutForUpdate(ctx context.Context, id pgtype.UUID) (Payout, error) {
+	row := q.db.QueryRow(ctx, getPayoutForUpdate, id)
+	var i Payout
+	err := row.Scan(
+		&i.ID,
+		&i.TransactionID,
+		&i.AccountID,
+		&i.AmountMicros,
+		&i.Currency,
+		&i.Status,
+		&i.GatewayRef,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getPayoutsByStatus = `-- name: GetPayoutsByStatus :many
+SELECT id, transaction_id, account_id, amount_micros, currency, status, gateway_ref, created_at, updated_at FROM payouts
+WHERE status = $1
+ORDER BY updated_at DESC, created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type GetPayoutsByStatusParams struct {
+	Status string `db:"status" json:"status"`
+	Limit  int32  `db:"limit" json:"limit"`
+	Offset int32  `db:"offset" json:"offset"`
+}
+
+func (q *Queries) GetPayoutsByStatus(ctx context.Context, arg GetPayoutsByStatusParams) ([]Payout, error) {
+	rows, err := q.db.Query(ctx, getPayoutsByStatus, arg.Status, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payout
+	for rows.Next() {
+		var i Payout
+		if err := rows.Scan(
+			&i.ID,
+			&i.TransactionID,
+			&i.AccountID,
+			&i.AmountMicros,
+			&i.Currency,
+			&i.Status,
+			&i.GatewayRef,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getPendingPayouts = `-- name: GetPendingPayouts :many
@@ -173,7 +249,7 @@ func (q *Queries) InsertPayout(ctx context.Context, arg InsertPayoutParams) (Pay
 	return i, err
 }
 
-const updatePayoutStatus = `-- name: UpdatePayoutStatus :exec
+const updatePayoutStatus = `-- name: UpdatePayoutStatus :execrows
 UPDATE payouts
 SET status = $1, gateway_ref = $2, updated_at = NOW()
 WHERE id = $3
@@ -185,7 +261,10 @@ type UpdatePayoutStatusParams struct {
 	ID         pgtype.UUID `db:"id" json:"id"`
 }
 
-func (q *Queries) UpdatePayoutStatus(ctx context.Context, arg UpdatePayoutStatusParams) error {
-	_, err := q.db.Exec(ctx, updatePayoutStatus, arg.Status, arg.GatewayRef, arg.ID)
-	return err
+func (q *Queries) UpdatePayoutStatus(ctx context.Context, arg UpdatePayoutStatusParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updatePayoutStatus, arg.Status, arg.GatewayRef, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

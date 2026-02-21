@@ -6,6 +6,9 @@ RETURNING *;
 -- name: GetPayout :one
 SELECT * FROM payouts WHERE id = $1;
 
+-- name: GetPayoutForUpdate :one
+SELECT * FROM payouts WHERE id = $1 FOR UPDATE;
+
 -- name: GetPendingPayouts :many
 SELECT * FROM payouts 
 WHERE status = 'PENDING' 
@@ -20,10 +23,20 @@ ORDER BY updated_at ASC
 FOR UPDATE SKIP LOCKED
 LIMIT $2;
 
--- name: UpdatePayoutStatus :exec
+-- name: UpdatePayoutStatus :execrows
 UPDATE payouts
 SET status = $1, gateway_ref = $2, updated_at = NOW()
 WHERE id = $3;
 
 -- name: GetPayoutByTransactionID :one
 SELECT * FROM payouts WHERE transaction_id = $1;
+
+-- name: GetPayoutsByStatus :many
+SELECT * FROM payouts
+WHERE status = $1
+ORDER BY updated_at DESC, created_at DESC
+LIMIT $2 OFFSET $3;
+
+-- name: CountPayoutsByStatus :one
+SELECT COUNT(*)::bigint FROM payouts
+WHERE status = $1;

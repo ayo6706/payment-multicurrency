@@ -18,14 +18,14 @@ WHERE reference_id = $1
 `
 
 type CheckTransactionIdempotencyRow struct {
-	ID          pgtype.UUID      `db:"id" json:"id"`
-	Amount      int64            `db:"amount" json:"amount"`
-	Currency    string           `db:"currency" json:"currency"`
-	Type        string           `db:"type" json:"type"`
-	Status      string           `db:"status" json:"status"`
-	ReferenceID string           `db:"reference_id" json:"reference_id"`
-	FxRate      pgtype.Numeric   `db:"fx_rate" json:"fx_rate"`
-	CreatedAt   pgtype.Timestamp `db:"created_at" json:"created_at"`
+	ID          pgtype.UUID        `db:"id" json:"id"`
+	Amount      int64              `db:"amount" json:"amount"`
+	Currency    string             `db:"currency" json:"currency"`
+	Type        string             `db:"type" json:"type"`
+	Status      string             `db:"status" json:"status"`
+	ReferenceID string             `db:"reference_id" json:"reference_id"`
+	FxRate      pgtype.Numeric     `db:"fx_rate" json:"fx_rate"`
+	CreatedAt   pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
 
 func (q *Queries) CheckTransactionIdempotency(ctx context.Context, referenceID string) (CheckTransactionIdempotencyRow, error) {
@@ -138,15 +138,15 @@ WHERE id = $1
 `
 
 type GetTransactionRow struct {
-	ID          pgtype.UUID      `db:"id" json:"id"`
-	Amount      int64            `db:"amount" json:"amount"`
-	Currency    string           `db:"currency" json:"currency"`
-	Type        string           `db:"type" json:"type"`
-	Status      string           `db:"status" json:"status"`
-	ReferenceID string           `db:"reference_id" json:"reference_id"`
-	FxRate      pgtype.Numeric   `db:"fx_rate" json:"fx_rate"`
-	Metadata    []byte           `db:"metadata" json:"metadata"`
-	CreatedAt   pgtype.Timestamp `db:"created_at" json:"created_at"`
+	ID          pgtype.UUID        `db:"id" json:"id"`
+	Amount      int64              `db:"amount" json:"amount"`
+	Currency    string             `db:"currency" json:"currency"`
+	Type        string             `db:"type" json:"type"`
+	Status      string             `db:"status" json:"status"`
+	ReferenceID string             `db:"reference_id" json:"reference_id"`
+	FxRate      pgtype.Numeric     `db:"fx_rate" json:"fx_rate"`
+	Metadata    []byte             `db:"metadata" json:"metadata"`
+	CreatedAt   pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
 
 func (q *Queries) GetTransaction(ctx context.Context, id pgtype.UUID) (GetTransactionRow, error) {
@@ -166,6 +166,20 @@ func (q *Queries) GetTransaction(ctx context.Context, id pgtype.UUID) (GetTransa
 	return i, err
 }
 
+const getTransactionStatusForUpdate = `-- name: GetTransactionStatusForUpdate :one
+SELECT status
+FROM transactions
+WHERE id = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetTransactionStatusForUpdate(ctx context.Context, id pgtype.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, getTransactionStatusForUpdate, id)
+	var status string
+	err := row.Scan(&status)
+	return status, err
+}
+
 const lockAccount = `-- name: LockAccount :one
 SELECT id FROM accounts WHERE id = $1 FOR UPDATE
 `
@@ -176,7 +190,7 @@ func (q *Queries) LockAccount(ctx context.Context, id pgtype.UUID) (pgtype.UUID,
 	return id, err
 }
 
-const updateAccountBalance = `-- name: UpdateAccountBalance :exec
+const updateAccountBalance = `-- name: UpdateAccountBalance :execrows
 UPDATE accounts
 SET balance = balance + $1
 WHERE id = $2
@@ -187,12 +201,36 @@ type UpdateAccountBalanceParams struct {
 	ID      pgtype.UUID `db:"id" json:"id"`
 }
 
-func (q *Queries) UpdateAccountBalance(ctx context.Context, arg UpdateAccountBalanceParams) error {
-	_, err := q.db.Exec(ctx, updateAccountBalance, arg.Balance, arg.ID)
-	return err
+func (q *Queries) UpdateAccountBalance(ctx context.Context, arg UpdateAccountBalanceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateAccountBalance, arg.Balance, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const updateTransactionStatus = `-- name: UpdateTransactionStatus :exec
+const updateTransactionFx = `-- name: UpdateTransactionFx :execrows
+UPDATE transactions
+SET fx_rate = $1,
+    metadata = $2
+WHERE id = $3
+`
+
+type UpdateTransactionFxParams struct {
+	FxRate   pgtype.Numeric `db:"fx_rate" json:"fx_rate"`
+	Metadata []byte         `db:"metadata" json:"metadata"`
+	ID       pgtype.UUID    `db:"id" json:"id"`
+}
+
+func (q *Queries) UpdateTransactionFx(ctx context.Context, arg UpdateTransactionFxParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateTransactionFx, arg.FxRate, arg.Metadata, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateTransactionStatus = `-- name: UpdateTransactionStatus :execrows
 UPDATE transactions
 SET status = $1
 WHERE id = $2
@@ -203,7 +241,10 @@ type UpdateTransactionStatusParams struct {
 	ID     pgtype.UUID `db:"id" json:"id"`
 }
 
-func (q *Queries) UpdateTransactionStatus(ctx context.Context, arg UpdateTransactionStatusParams) error {
-	_, err := q.db.Exec(ctx, updateTransactionStatus, arg.Status, arg.ID)
-	return err
+func (q *Queries) UpdateTransactionStatus(ctx context.Context, arg UpdateTransactionStatusParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateTransactionStatus, arg.Status, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
