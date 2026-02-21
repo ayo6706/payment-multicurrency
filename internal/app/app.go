@@ -24,7 +24,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// Run bootstraps the HTTP server and payout worker, blocking until shutdown.
 func Run() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -35,10 +34,15 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("init logger: %w", err)
 	}
+
 	defer logger.Sync()
+
 	zap.ReplaceGlobals(logger)
+
 	observability.Init()
+
 	middleware.SetJWTSecret(cfg.JWTSecret)
+	middleware.SetJWTValidation(cfg.JWTIssuer, cfg.JWTAudience)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -59,16 +63,24 @@ func Run() error {
 	repo := repository.NewRepository(pool)
 	store := repository.NewStore(pool)
 
+	mockFX := service.NewMockExchangeRateService()
+	transferSvc := service.NewTransferService(store, mockFX)
+	accountSvc := service.NewAccountService(repo)
 	mockGateway := gateway.NewMockGateway()
 	payoutSvc := service.NewPayoutService(store, mockGateway)
 	payoutWorker := worker.NewPayoutWorker(payoutSvc)
 	payoutWorker.WithPollInterval(cfg.PayoutPollInterval)
 	payoutWorker.WithBatchSize(cfg.PayoutBatchSize)
+	webhookSvc := service.NewWebhookService(store, cfg.WebhookHMACKey, cfg.WebhookSkipSignature)
+	reconciliationSvc := service.NewReconciliationService(store)
+	reconciliationWorker := worker.NewReconciliationWorker(reconciliationSvc).WithInterval(cfg.ReconciliationInterval)
 
 	stopWorker := payoutWorker.Run(ctx)
 	logger.Info("payout worker started", zap.Duration("interval", cfg.PayoutPollInterval), zap.Int32("batch", cfg.PayoutBatchSize))
+	stopReconciliationWorker := reconciliationWorker.Run(ctx)
+	logger.Info("reconciliation worker started", zap.Duration("interval", cfg.ReconciliationInterval))
 
-	router := api.NewRouter(cfg, logger, pool, repo, idemStore, redisClient)
+	router := api.NewRouter(cfg, logger, pool, repo, idemStore, redisClient, accountSvc, transferSvc, payoutSvc, webhookSvc)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.HTTPPort,
@@ -98,6 +110,8 @@ func Run() error {
 
 	logger.Info("stopping payout worker")
 	stopWorker()
+	logger.Info("stopping reconciliation worker")
+	stopReconciliationWorker()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()

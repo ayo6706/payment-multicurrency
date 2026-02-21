@@ -31,11 +31,11 @@ func (s *MockExchangeRateService) GetExchangeRate(ctx context.Context, source, t
 		return decimal.NewFromInt(1), nil
 	}
 
-	// Base rates relative to USD
-	rates := map[string]float64{
-		"USD": 1.0,
-		"EUR": 0.92,
-		"GBP": 0.79,
+	// Base rates relative to USD.
+	rates := map[string]string{
+		"USD": "1",
+		"EUR": "0.92",
+		"GBP": "0.79",
 	}
 
 	sourceRate, ok1 := rates[source]
@@ -49,8 +49,14 @@ func (s *MockExchangeRateService) GetExchangeRate(ctx context.Context, source, t
 	// e.g. USD -> EUR = 0.92 / 1.0 = 0.92
 	// e.g. EUR -> USD = 1.0 / 0.92 = 1.0869...
 
-	sRate := decimal.NewFromFloat(sourceRate)
-	tRate := decimal.NewFromFloat(targetRate)
+	sRate, err := decimal.NewFromString(sourceRate)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("%w: invalid source rate %s", models.ErrRateUnavailable, sourceRate)
+	}
+	tRate, err := decimal.NewFromString(targetRate)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("%w: invalid target rate %s", models.ErrRateUnavailable, targetRate)
+	}
 
 	return tRate.Div(sRate), nil
 }
