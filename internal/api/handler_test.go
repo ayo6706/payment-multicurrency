@@ -18,9 +18,11 @@ import (
 	"github.com/ayo6706/payment-multicurrency/internal/api/middleware"
 	"github.com/ayo6706/payment-multicurrency/internal/config"
 	"github.com/ayo6706/payment-multicurrency/internal/domain"
+	"github.com/ayo6706/payment-multicurrency/internal/gateway"
 	"github.com/ayo6706/payment-multicurrency/internal/idempotency"
 	"github.com/ayo6706/payment-multicurrency/internal/models"
 	"github.com/ayo6706/payment-multicurrency/internal/repository"
+	"github.com/ayo6706/payment-multicurrency/internal/service"
 	"github.com/ayo6706/payment-multicurrency/internal/testutil/dblock"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -31,6 +33,12 @@ import (
 )
 
 var testDB *pgxpool.Pool
+
+const (
+	testJWTSecret   = "test-secret-0123456789-test-secret"
+	testJWTIssuer   = "payment-multicurrency-test"
+	testJWTAudience = "payment-api-test"
+)
 
 func TestMain(m *testing.M) {
 	release := dblock.Acquire()
@@ -56,7 +64,9 @@ func TestMain(m *testing.M) {
 	}
 
 	ensureIdempotencyTable(ctx)
-	middleware.SetJWTSecret("test-secret")
+	ensureAuditLogTable(ctx)
+	middleware.SetJWTSecret(testJWTSecret)
+	middleware.SetJWTValidation(testJWTIssuer, testJWTAudience)
 
 	code := m.Run()
 	release()
@@ -64,16 +74,23 @@ func TestMain(m *testing.M) {
 }
 
 func cleanupDB(t *testing.T) {
-	_, err := testDB.Exec(context.Background(), "TRUNCATE TABLE users, accounts, transactions, entries, idempotency_keys CASCADE")
+	_, err := testDB.Exec(context.Background(), "TRUNCATE TABLE audit_log, payouts, users, accounts, transactions, entries, idempotency_keys CASCADE")
 	require.NoError(t, err)
 	seedSystemAccounts(t)
 }
 
 func setupAPI() *api.Router {
 	repo := repository.NewRepository(testDB)
+	store := repository.NewStore(testDB)
+	accountSvc := service.NewAccountService(repo)
+	transferSvc := service.NewTransferService(store, service.NewMockExchangeRateService())
+	payoutSvc := service.NewPayoutService(store, gateway.NewMockGateway())
+	webhookSvc := service.NewWebhookService(store, "test", false)
 	cfg := &config.Config{
 		HTTPPort:             "0",
-		JWTSecret:            "test-secret",
+		JWTSecret:            testJWTSecret,
+		JWTIssuer:            testJWTIssuer,
+		JWTAudience:          testJWTAudience,
 		WebhookHMACKey:       "test",
 		WebhookSkipSignature: false,
 		PublicRateLimitRPS:   1000,
@@ -82,8 +99,8 @@ func setupAPI() *api.Router {
 		PayoutBatchSize:      5,
 		IdempotencyTTL:       time.Hour,
 	}
-	store := idempotency.NewStore(nil, testDB, cfg.IdempotencyTTL)
-	return api.NewRouter(cfg, zap.NewNop(), testDB, repo, store, nil)
+	idemStore := idempotency.NewStore(nil, testDB, cfg.IdempotencyTTL)
+	return api.NewRouter(cfg, zap.NewNop(), testDB, repo, idemStore, nil, accountSvc, transferSvc, payoutSvc, webhookSvc)
 }
 
 func generateTestToken(userID string) string {
@@ -91,10 +108,16 @@ func generateTestToken(userID string) string {
 }
 
 func generateTokenWithRole(userID, role string) string {
+	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": userID,
 		"role":    role,
-		"exp":     time.Now().Add(time.Hour).Unix(),
+		"iss":     testJWTIssuer,
+		"aud":     testJWTAudience,
+		"sub":     userID,
+		"iat":     now.Unix(),
+		"nbf":     now.Add(-30 * time.Second).Unix(),
+		"exp":     now.Add(time.Hour).Unix(),
 	})
 	tokenString, _ := token.SignedString(middleware.JWTSecret())
 	return tokenString
@@ -131,6 +154,49 @@ ALTER TABLE idempotency_keys ALTER COLUMN content_type SET DEFAULT 'application/
 		fmt.Printf("failed to alter idempotency table: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func ensureAuditLogTable(ctx context.Context) {
+	ddl := `
+CREATE TABLE IF NOT EXISTS audit_log (
+	    id BIGSERIAL PRIMARY KEY,
+	    entity_type TEXT NOT NULL,
+	    entity_id UUID NOT NULL,
+	    actor_id UUID,
+	    action TEXT NOT NULL,
+	    prev_state TEXT,
+	    next_state TEXT,
+	    metadata JSONB,
+	    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`
+	if _, err := testDB.Exec(ctx, ddl); err != nil {
+		fmt.Printf("failed to ensure audit_log table: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func TestRFC7807ProblemDetails(t *testing.T) {
+	cleanupDB(t)
+	a := setupAPI()
+	client := a.Routes()
+
+	accountID := uuid.New().String()
+	req := httptest.NewRequest("GET", "/v1/accounts/"+accountID+"/balance", nil)
+	w := httptest.NewRecorder()
+	client.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Contains(t, w.Header().Get("Content-Type"), "application/problem+json")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.NotEmpty(t, body["type"])
+	assert.Equal(t, float64(http.StatusUnauthorized), body["status"])
+	assert.NotEmpty(t, body["title"])
+	assert.NotEmpty(t, body["detail"])
+	assert.Equal(t, "/v1/accounts/"+accountID+"/balance", body["instance"])
+	assert.NotEmpty(t, body["request_id"])
 }
 
 func TestCreateUser(t *testing.T) {
@@ -197,7 +263,7 @@ func TestCreateUserIgnoresRequestedRole(t *testing.T) {
 	require.NoError(t, json.Unmarshal(loginW.Body.Bytes(), &loginResp))
 	parsed, err := jwt.Parse(loginResp.Token, func(token *jwt.Token) (interface{}, error) {
 		return middleware.JWTSecret(), nil
-	})
+	}, jwt.WithIssuer(testJWTIssuer), jwt.WithAudience(testJWTAudience))
 	require.NoError(t, err)
 	claims, ok := parsed.Claims.(jwt.MapClaims)
 	require.True(t, ok)
@@ -295,7 +361,7 @@ func TestCreateAccountInvalidCurrency(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	client.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestGetBalanceSuccessAndUnauthorized(t *testing.T) {
@@ -508,7 +574,7 @@ func TestTransferExchangeSuccessAndSameAccount(t *testing.T) {
 				"from_currency":   "USD",
 				"to_currency":     "EUR",
 			},
-			status: http.StatusInternalServerError,
+			status: http.StatusBadRequest,
 		},
 	}
 
@@ -607,6 +673,132 @@ func TestGetPayoutUnauthorizedAndNotFound(t *testing.T) {
 	}
 }
 
+func TestGetPayoutForbiddenForNonOwner(t *testing.T) {
+	cleanupDB(t)
+	a := setupAPI()
+	client := a.Routes()
+	repo := repository.NewRepository(testDB)
+	queries := repository.New(testDB)
+
+	owner := &models.User{ID: uuid.New(), Username: "p-owner", Email: "p-owner@example.com"}
+	require.NoError(t, repo.CreateUser(context.Background(), owner))
+	other := &models.User{ID: uuid.New(), Username: "p-other", Email: "p-other@example.com"}
+	require.NoError(t, repo.CreateUser(context.Background(), other))
+
+	acc := &models.Account{ID: uuid.New(), UserID: owner.ID, Currency: "USD", Balance: 1_000_000}
+	require.NoError(t, repo.CreateAccount(context.Background(), acc))
+
+	txID := uuid.New()
+	_, err := queries.CreateTransaction(context.Background(), repository.CreateTransactionParams{
+		ID:          repository.ToPgUUID(txID),
+		Amount:      1000,
+		Currency:    "USD",
+		Type:        domain.TxTypePayout,
+		Status:      domain.TxStatusPending,
+		ReferenceID: "payout-owner-check",
+	})
+	require.NoError(t, err)
+
+	payoutID := uuid.New()
+	_, err = queries.InsertPayout(context.Background(), repository.InsertPayoutParams{
+		ID:            repository.ToPgUUID(payoutID),
+		TransactionID: repository.ToPgUUID(txID),
+		AccountID:     repository.ToPgUUID(acc.ID),
+		AmountMicros:  1000,
+		Currency:      "USD",
+		Status:        domain.PayoutStatusPending,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/v1/payouts/"+payoutID.String(), nil)
+	req.Header.Set("Authorization", "Bearer "+generateTestToken(other.ID.String()))
+	w := httptest.NewRecorder()
+	client.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestManualReviewPayoutEndpoints(t *testing.T) {
+	cleanupDB(t)
+	a := setupAPI()
+	client := a.Routes()
+	repo := repository.NewRepository(testDB)
+	queries := repository.New(testDB)
+
+	admin := &models.User{ID: uuid.New(), Username: "mr-admin", Email: "mr-admin@example.com"}
+	require.NoError(t, repo.CreateUser(context.Background(), admin))
+	_, err := testDB.Exec(context.Background(), "UPDATE users SET role='admin' WHERE id=$1", repository.ToPgUUID(admin.ID))
+	require.NoError(t, err)
+
+	account := &models.Account{ID: uuid.New(), UserID: admin.ID, Currency: "USD", Balance: 1_000_000}
+	require.NoError(t, repo.CreateAccount(context.Background(), account))
+
+	txID := uuid.New()
+	_, err = queries.CreateTransaction(context.Background(), repository.CreateTransactionParams{
+		ID:          repository.ToPgUUID(txID),
+		Amount:      1_200,
+		Currency:    "USD",
+		Type:        domain.TxTypePayout,
+		Status:      domain.TxStatusProcessing,
+		ReferenceID: "manual-review-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	payoutID := uuid.New()
+	gatewayRef := "GW-MANUAL-123"
+	_, err = queries.InsertPayout(context.Background(), repository.InsertPayoutParams{
+		ID:            repository.ToPgUUID(payoutID),
+		TransactionID: repository.ToPgUUID(txID),
+		AccountID:     repository.ToPgUUID(account.ID),
+		AmountMicros:  1_200,
+		Currency:      "USD",
+		Status:        domain.PayoutStatusManualReview,
+	})
+	require.NoError(t, err)
+	_, err = queries.UpdatePayoutStatus(context.Background(), repository.UpdatePayoutStatusParams{
+		Status:     domain.PayoutStatusManualReview,
+		GatewayRef: &gatewayRef,
+		ID:         repository.ToPgUUID(payoutID),
+	})
+	require.NoError(t, err)
+	_, err = testDB.Exec(context.Background(), "UPDATE accounts SET locked_micros=$1 WHERE id=$2", 1200, repository.ToPgUUID(account.ID))
+	require.NoError(t, err)
+
+	token := loginAndGetToken(t, client, admin.ID)
+
+	listReq := httptest.NewRequest("GET", "/v1/payouts/manual-review?limit=10&offset=0", nil)
+	listReq.Header.Set("Authorization", "Bearer "+token)
+	listW := httptest.NewRecorder()
+	client.ServeHTTP(listW, listReq)
+	require.Equal(t, http.StatusOK, listW.Code)
+
+	var listResp struct {
+		Items []models.Payout `json:"items"`
+		Count int             `json:"count"`
+	}
+	require.NoError(t, json.Unmarshal(listW.Body.Bytes(), &listResp))
+	require.GreaterOrEqual(t, listResp.Count, 1)
+
+	resolveBody, _ := json.Marshal(map[string]string{
+		"decision": "confirm_sent",
+		"reason":   "confirmed with provider report",
+	})
+	resolveReq := httptest.NewRequest("POST", "/v1/payouts/"+payoutID.String()+"/resolve", bytes.NewReader(resolveBody))
+	resolveReq.Header.Set("Authorization", "Bearer "+token)
+	resolveReq.Header.Set("Content-Type", "application/json")
+	resolveW := httptest.NewRecorder()
+	client.ServeHTTP(resolveW, resolveReq)
+	require.Equal(t, http.StatusOK, resolveW.Code)
+
+	var resolved models.Payout
+	require.NoError(t, json.Unmarshal(resolveW.Body.Bytes(), &resolved))
+	require.Equal(t, domain.PayoutStatusCompleted, resolved.Status)
+
+	accountAfter, err := queries.GetAccountBalanceAndLocked(context.Background(), repository.ToPgUUID(account.ID))
+	require.NoError(t, err)
+	require.Equal(t, int64(998_800), accountAfter.Balance)
+	require.Equal(t, int64(0), accountAfter.LockedMicros)
+}
+
 func TestWebhookInvalidSignature(t *testing.T) {
 	cleanupDB(t)
 	a := setupAPI()
@@ -688,6 +880,8 @@ func TestHealthAndMetrics(t *testing.T) {
 		{name: "live", path: "/health/live"},
 		{name: "ready", path: "/health/ready"},
 		{name: "metrics", path: "/metrics"},
+		{name: "openapi", path: "/openapi.yaml"},
+		{name: "swagger", path: "/swagger/index.html"},
 	}
 
 	for _, tc := range cases {
