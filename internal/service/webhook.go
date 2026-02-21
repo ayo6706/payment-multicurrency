@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ayo6706/payment-multicurrency/internal/domain"
 	"github.com/ayo6706/payment-multicurrency/internal/repository"
@@ -15,11 +16,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+var (
+	ErrInvalidSignature       = errors.New("invalid signature")
+	ErrDepositInProgress      = errors.New("deposit is still processing")
+	ErrDepositPayloadMismatch = errors.New("deposit payload does not match existing reference")
+)
+
 // WebhookService handles incoming webhook events from external systems.
 type WebhookService struct {
 	store   QueryStore
 	hmacKey []byte
 	skipSig bool
+	audit   *AuditService
 }
 
 // NewWebhookService creates a new WebhookService instance.
@@ -28,6 +36,7 @@ func NewWebhookService(store QueryStore, hmacKey string, skipSignature bool) *We
 		store:   store,
 		hmacKey: []byte(hmacKey),
 		skipSig: skipSignature,
+		audit:   NewAuditService(store),
 	}
 }
 
@@ -50,18 +59,18 @@ type DepositWebhookResponse struct {
 // It verifies the HMAC signature, creates a transaction, updates the user balance,
 // and writes double-entry ledger entries (System DEBIT, User CREDIT).
 func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byte, signature string) (*DepositWebhookResponse, error) {
-	// 1. Verify HMAC signature
 	if !s.verifyHMAC(payload, signature) {
-		return nil, errors.New("invalid signature")
+		return nil, ErrInvalidSignature
 	}
 
-	// 2. Parse payload
 	var deposit DepositWebhookPayload
 	if err := json.Unmarshal(payload, &deposit); err != nil {
 		return nil, fmt.Errorf("invalid payload: %w", err)
 	}
+	deposit.Currency = strings.ToUpper(strings.TrimSpace(deposit.Currency))
+	deposit.Reference = strings.TrimSpace(deposit.Reference)
+	deposit.AccountID = strings.TrimSpace(deposit.AccountID)
 
-	// Validate payload
 	if deposit.AmountMicros <= 0 {
 		return nil, fmt.Errorf("invalid amount: %d", deposit.AmountMicros)
 	}
@@ -72,7 +81,6 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 		return nil, errors.New("account_id is required")
 	}
 
-	// Validate currency
 	if !isValidCurrency(deposit.Currency) {
 		return nil, fmt.Errorf("unsupported currency: %s", deposit.Currency)
 	}
@@ -83,30 +91,48 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 	}
 
 	queries := s.store.Queries()
-
-	// Check idempotency using the reference
 	existingTxRow, err := queries.CheckTransactionIdempotency(ctx, deposit.Reference)
-	if err == nil {
-		// Already processed
-		return &DepositWebhookResponse{
-			TransactionID: repository.FromPgUUID(existingTxRow.ID),
-			Status:        existingTxRow.Status,
-			Message:       "Deposit already processed",
-		}, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("failed to check idempotency: %w", err)
 	}
 
-	// Get system account for this currency
+	retryExisting := false
+	transactionID := uuid.New()
+	if err == nil {
+		if existingTxRow.Type != domain.TxTypeDeposit || existingTxRow.Amount != deposit.AmountMicros || existingTxRow.Currency != deposit.Currency {
+			return nil, ErrDepositPayloadMismatch
+		}
+		switch strings.ToUpper(existingTxRow.Status) {
+		case domain.TxStatusCompleted:
+			return &DepositWebhookResponse{
+				TransactionID: repository.FromPgUUID(existingTxRow.ID),
+				Status:        existingTxRow.Status,
+				Message:       "Deposit already processed",
+			}, nil
+		case domain.TxStatusPending, domain.TxStatusProcessing:
+			return nil, ErrDepositInProgress
+		case domain.TxStatusFailed:
+			retryExisting = true
+			transactionID = repository.FromPgUUID(existingTxRow.ID)
+		default:
+			return nil, fmt.Errorf("existing reference in unsupported state: %s", existingTxRow.Status)
+		}
+	}
+
 	systemAccountID, err := getSystemAccountID(deposit.Currency)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get system account: %w", err)
 	}
 
-	transactionID := uuid.New()
+	metadataJson, err := json.Marshal(map[string]string{
+		"webhook_reference": deposit.Reference,
+		"account_id":        deposit.AccountID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode metadata: %w", err)
+	}
+
 	err = s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
-		// Lock user account and verify currency
 		accountRow, err := qtx.GetAccountBalanceAndLocked(ctx, repository.ToPgUUID(accountID))
 		if err != nil {
 			return fmt.Errorf("failed to lock account: %w", err)
@@ -116,29 +142,31 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 			return fmt.Errorf("currency mismatch: account is %s, deposit is %s", accountRow.Currency, deposit.Currency)
 		}
 
-		// Create transaction record
-		metadataJson, err := json.Marshal(map[string]string{
-			"webhook_reference": deposit.Reference,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to encode metadata: %w", err)
+		if retryExisting {
+			if err := transitionTransactionState(ctx, qtx, s.audit, transactionID, domain.TxStatusProcessing, nil, "retry_processing_started", metadataJson); err != nil {
+				return fmt.Errorf("failed to transition retry transaction: %w", err)
+			}
+		} else {
+			_, err = qtx.CreateTransaction(ctx, repository.CreateTransactionParams{
+				ID:          repository.ToPgUUID(transactionID),
+				Amount:      deposit.AmountMicros,
+				Currency:    deposit.Currency,
+				Type:        domain.TxTypeDeposit,
+				Status:      domain.TxStatusPending,
+				ReferenceID: deposit.Reference,
+				Metadata:    metadataJson,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create transaction: %w", err)
+			}
+			if err := s.audit.Write(ctx, qtx, "transaction", transactionID, nil, "created", "", domain.TxStatusPending, metadataJson); err != nil {
+				return err
+			}
+			if err := transitionTransactionState(ctx, qtx, s.audit, transactionID, domain.TxStatusProcessing, nil, "processing_started", nil); err != nil {
+				return fmt.Errorf("failed to transition transaction to processing: %w", err)
+			}
 		}
 
-		_, err = qtx.CreateTransaction(ctx, repository.CreateTransactionParams{
-			ID:          repository.ToPgUUID(transactionID),
-			Amount:      deposit.AmountMicros,
-			Currency:    deposit.Currency,
-			Type:        domain.TxTypeDeposit,
-			Status:      domain.TxStatusCompleted,
-			ReferenceID: deposit.Reference,
-			Metadata:    metadataJson,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create transaction: %w", err)
-		}
-
-		// Create double-entry ledger entries
-		// Entry 1: Debit System (system account is debited for the deposit)
 		_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
 			ID:            repository.ToPgUUID(uuid.New()),
 			TransactionID: repository.ToPgUUID(transactionID),
@@ -150,7 +178,6 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 			return fmt.Errorf("failed to create system debit entry: %w", err)
 		}
 
-		// Entry 2: Credit User (user account receives the deposit)
 		_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
 			ID:            repository.ToPgUUID(uuid.New()),
 			TransactionID: repository.ToPgUUID(transactionID),
@@ -162,30 +189,41 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 			return fmt.Errorf("failed to create user credit entry: %w", err)
 		}
 
-		// Update user balance
-		err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		rows, err := qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
 			Balance: deposit.AmountMicros,
 			ID:      repository.ToPgUUID(accountID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to update user balance: %w", err)
 		}
+		if err := requireExactlyOne(rows, "credit deposit account"); err != nil {
+			return err
+		}
 
-		// Mirror the system ledger debit on the accounts table
-		err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		rows, err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
 			Balance: -deposit.AmountMicros,
 			ID:      repository.ToPgUUID(systemAccountID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to update system balance: %w", err)
 		}
-
+		if err := requireExactlyOne(rows, "debit system liquidity account"); err != nil {
+			return err
+		}
+		if err := transitionTransactionState(ctx, qtx, s.audit, transactionID, domain.TxStatusCompleted, nil, "completed", nil); err != nil {
+			return fmt.Errorf("failed to complete webhook transaction: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
+		if !retryExisting {
+			failErr := s.transitionState(ctx, transactionID, domain.TxStatusFailed, "failed", []byte(`{"reason":"deposit_failed"}`))
+			if failErr != nil && !errors.Is(failErr, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("deposit failed: %w (status update failed: %v)", err, failErr)
+			}
+		}
 		return nil, err
 	}
-
 	return &DepositWebhookResponse{
 		TransactionID: transactionID,
 		Status:        domain.TxStatusCompleted,
@@ -195,8 +233,11 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 
 // verifyHMAC verifies the HMAC signature of the payload.
 func (s *WebhookService) verifyHMAC(payload []byte, signature string) bool {
-	if s.skipSig || len(s.hmacKey) == 0 {
+	if s.skipSig {
 		return true
+	}
+	if len(s.hmacKey) == 0 {
+		return false
 	}
 
 	// Calculate expected HMAC
@@ -216,4 +257,10 @@ func isValidCurrency(currency string) bool {
 	default:
 		return false
 	}
+}
+
+func (s *WebhookService) transitionState(ctx context.Context, transactionID uuid.UUID, nextState, action string, metadata []byte) error {
+	return s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
+		return transitionTransactionState(ctx, qtx, s.audit, transactionID, nextState, nil, action, metadata)
+	})
 }
