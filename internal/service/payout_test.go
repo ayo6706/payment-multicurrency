@@ -94,6 +94,15 @@ func TestPayoutProcessSuccess(t *testing.T) {
 	txRow, err := queries.GetTransaction(ctx, payoutRow.TransactionID)
 	require.NoError(t, err)
 	require.Equal(t, domain.TxStatusCompleted, txRow.Status)
+	auditRows, err := queries.GetAuditLogsByEntity(ctx, repository.GetAuditLogsByEntityParams{
+		EntityType: "transaction",
+		EntityID:   payoutRow.TransactionID,
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(auditRows), 3)
+	require.Equal(t, "created", auditRows[0].Action)
+	require.Equal(t, "processing_started", auditRows[1].Action)
+	require.Equal(t, "payout_completed", auditRows[2].Action)
 
 	accRow, err = queries.GetAccountBalanceAndLocked(ctx, repository.ToPgUUID(account.ID))
 	require.NoError(t, err)
@@ -143,6 +152,15 @@ func TestPayoutProcessFailureReleasesFunds(t *testing.T) {
 	txRow, err := queries.GetTransaction(ctx, payoutRow.TransactionID)
 	require.NoError(t, err)
 	require.Equal(t, domain.TxStatusFailed, txRow.Status)
+	auditRows, err := queries.GetAuditLogsByEntity(ctx, repository.GetAuditLogsByEntityParams{
+		EntityType: "transaction",
+		EntityID:   payoutRow.TransactionID,
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(auditRows), 3)
+	require.Equal(t, "created", auditRows[0].Action)
+	require.Equal(t, "processing_started", auditRows[1].Action)
+	require.Equal(t, "payout_failed", auditRows[2].Action)
 
 	accRow, err := queries.GetAccountBalanceAndLocked(ctx, repository.ToPgUUID(account.ID))
 	require.NoError(t, err)
@@ -181,15 +199,17 @@ func TestPayoutProcessRecoversStaleProcessing(t *testing.T) {
 	require.NoError(t, err)
 
 	// Simulate a worker that claimed the payout and then crashed.
-	require.NoError(t, queries.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+	_, err = queries.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
 		Status:     domain.PayoutStatusProcessing,
 		GatewayRef: nil,
 		ID:         payoutRow.ID,
-	}))
-	require.NoError(t, queries.UpdateTransactionStatus(ctx, repository.UpdateTransactionStatusParams{
+	})
+	require.NoError(t, err)
+	_, err = queries.UpdateTransactionStatus(ctx, repository.UpdateTransactionStatusParams{
 		Status: domain.TxStatusProcessing,
 		ID:     payoutRow.TransactionID,
-	}))
+	})
+	require.NoError(t, err)
 	_, err = db.Exec(ctx, "UPDATE payouts SET updated_at = $1 WHERE id = $2", time.Now().Add(-3*time.Minute), payoutRow.ID)
 	require.NoError(t, err)
 
@@ -240,4 +260,133 @@ func TestUpdatePayoutFailedReleasesLockedFunds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(0), accRow.LockedMicros)
 	require.Equal(t, int64(1_000_000), accRow.Balance)
+}
+
+func TestResolveManualReviewPayoutConfirmSent(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	repoSvc := repository.NewRepository(db)
+	store := repository.NewStore(db)
+	payoutSvc := NewPayoutService(store, &stubGateway{})
+	queries := repository.New(db)
+	ctx := context.Background()
+
+	user := &models.User{ID: uuid.New(), Username: "manual-confirm", Email: "manual-confirm@example.com"}
+	require.NoError(t, repoSvc.CreateUser(ctx, user))
+	account := &models.Account{ID: uuid.New(), UserID: user.ID, Currency: "USD", Balance: 1_000_000}
+	require.NoError(t, repoSvc.CreateAccount(ctx, account))
+
+	txID := uuid.New()
+	_, err := queries.CreateTransaction(ctx, repository.CreateTransactionParams{
+		ID:          repository.ToPgUUID(txID),
+		Amount:      2_500,
+		Currency:    "USD",
+		Type:        domain.TxTypePayout,
+		Status:      domain.TxStatusProcessing,
+		ReferenceID: "manual-confirm-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	payoutID := uuid.New()
+	ref := "GW-CONFIRM-1"
+	_, err = queries.InsertPayout(ctx, repository.InsertPayoutParams{
+		ID:            repository.ToPgUUID(payoutID),
+		TransactionID: repository.ToPgUUID(txID),
+		AccountID:     repository.ToPgUUID(account.ID),
+		AmountMicros:  2_500,
+		Currency:      "USD",
+		Status:        domain.PayoutStatusManualReview,
+	})
+	require.NoError(t, err)
+	_, err = queries.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+		Status:     domain.PayoutStatusManualReview,
+		GatewayRef: &ref,
+		ID:         repository.ToPgUUID(payoutID),
+	})
+	require.NoError(t, err)
+	_, err = db.Exec(ctx, "UPDATE accounts SET locked_micros=$1 WHERE id=$2", 2500, repository.ToPgUUID(account.ID))
+	require.NoError(t, err)
+
+	resolved, err := payoutSvc.ResolveManualReviewPayout(ctx, ResolveManualReviewRequest{
+		PayoutID: payoutID,
+		Decision: DecisionConfirmSent,
+		Reason:   "confirmed by gateway operations team",
+	})
+	require.NoError(t, err)
+	require.Equal(t, domain.PayoutStatusCompleted, resolved.Status)
+
+	payoutRow, err := queries.GetPayout(ctx, repository.ToPgUUID(payoutID))
+	require.NoError(t, err)
+	require.Equal(t, domain.PayoutStatusCompleted, payoutRow.Status)
+
+	txRow, err := queries.GetTransaction(ctx, repository.ToPgUUID(txID))
+	require.NoError(t, err)
+	require.Equal(t, domain.TxStatusCompleted, txRow.Status)
+
+	accountRow, err := queries.GetAccountBalanceAndLocked(ctx, repository.ToPgUUID(account.ID))
+	require.NoError(t, err)
+	require.Equal(t, int64(997_500), accountRow.Balance)
+	require.Equal(t, int64(0), accountRow.LockedMicros)
+}
+
+func TestResolveManualReviewPayoutRefundFailed(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	repoSvc := repository.NewRepository(db)
+	store := repository.NewStore(db)
+	payoutSvc := NewPayoutService(store, &stubGateway{})
+	queries := repository.New(db)
+	ctx := context.Background()
+
+	user := &models.User{ID: uuid.New(), Username: "manual-refund", Email: "manual-refund@example.com"}
+	require.NoError(t, repoSvc.CreateUser(ctx, user))
+	account := &models.Account{ID: uuid.New(), UserID: user.ID, Currency: "USD", Balance: 1_000_000}
+	require.NoError(t, repoSvc.CreateAccount(ctx, account))
+
+	txID := uuid.New()
+	_, err := queries.CreateTransaction(ctx, repository.CreateTransactionParams{
+		ID:          repository.ToPgUUID(txID),
+		Amount:      3_000,
+		Currency:    "USD",
+		Type:        domain.TxTypePayout,
+		Status:      domain.TxStatusProcessing,
+		ReferenceID: "manual-refund-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	payoutID := uuid.New()
+	_, err = queries.InsertPayout(ctx, repository.InsertPayoutParams{
+		ID:            repository.ToPgUUID(payoutID),
+		TransactionID: repository.ToPgUUID(txID),
+		AccountID:     repository.ToPgUUID(account.ID),
+		AmountMicros:  3_000,
+		Currency:      "USD",
+		Status:        domain.PayoutStatusManualReview,
+	})
+	require.NoError(t, err)
+	_, err = db.Exec(ctx, "UPDATE accounts SET locked_micros=$1 WHERE id=$2", 3000, repository.ToPgUUID(account.ID))
+	require.NoError(t, err)
+
+	resolved, err := payoutSvc.ResolveManualReviewPayout(ctx, ResolveManualReviewRequest{
+		PayoutID: payoutID,
+		Decision: DecisionRefundFailed,
+		Reason:   "provider confirmed send never happened",
+	})
+	require.NoError(t, err)
+	require.Equal(t, domain.PayoutStatusFailed, resolved.Status)
+
+	payoutRow, err := queries.GetPayout(ctx, repository.ToPgUUID(payoutID))
+	require.NoError(t, err)
+	require.Equal(t, domain.PayoutStatusFailed, payoutRow.Status)
+
+	txRow, err := queries.GetTransaction(ctx, repository.ToPgUUID(txID))
+	require.NoError(t, err)
+	require.Equal(t, domain.TxStatusFailed, txRow.Status)
+
+	accountRow, err := queries.GetAccountBalanceAndLocked(ctx, repository.ToPgUUID(account.ID))
+	require.NoError(t, err)
+	require.Equal(t, int64(1_000_000), accountRow.Balance)
+	require.Equal(t, int64(0), accountRow.LockedMicros)
 }

@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ayo6706/payment-multicurrency/internal/domain"
 	"github.com/ayo6706/payment-multicurrency/internal/gateway"
 	"github.com/ayo6706/payment-multicurrency/internal/models"
+	"github.com/ayo6706/payment-multicurrency/internal/observability"
 	"github.com/ayo6706/payment-multicurrency/internal/repository"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -21,18 +23,22 @@ import (
 type PayoutService struct {
 	store   QueryStore
 	gateway gateway.Gateway
+	audit   *AuditService
 }
 
-// ErrPayoutNotFound indicates the requested payout does not exist.
-var ErrPayoutNotFound = errors.New("payout not found")
+var (
+	ErrPayoutNotFound              = errors.New("payout not found")
+	ErrPayoutNotInManualReview     = errors.New("payout is not in manual review")
+	ErrInvalidManualReviewDecision = errors.New("invalid manual review decision")
+)
 
 const stalePayoutRecoveryWindow = 2 * time.Minute
 
-// NewPayoutService creates a new PayoutService instance.
 func NewPayoutService(store QueryStore, gw gateway.Gateway) *PayoutService {
 	return &PayoutService{
 		store:   store,
 		gateway: gw,
+		audit:   NewAuditService(store),
 	}
 }
 
@@ -68,6 +74,21 @@ type PayoutResponse struct {
 	Status    string    `json:"status"`
 	Message   string    `json:"message"`
 	CreatedAt string    `json:"created_at,omitempty"`
+}
+
+type ResolveManualReviewDecision string
+
+const (
+	DecisionConfirmSent  ResolveManualReviewDecision = "confirm_sent"
+	DecisionRefundFailed ResolveManualReviewDecision = "refund_failed"
+)
+
+type ResolveManualReviewRequest struct {
+	PayoutID   uuid.UUID
+	Decision   ResolveManualReviewDecision
+	Reason     string
+	ActorID    *uuid.UUID
+	GatewayRef *string
 }
 
 // RequestPayout creates a new external payout request.
@@ -131,12 +152,15 @@ func (s *PayoutService) RequestPayout(ctx context.Context, req RequestPayoutRequ
 		}
 
 		// Lock the funds
-		err = qtx.LockAccountFunds(ctx, repository.LockAccountFundsParams{
+		rows, err := qtx.LockAccountFunds(ctx, repository.LockAccountFundsParams{
 			LockedMicros: req.AmountMicros,
 			ID:           repository.ToPgUUID(req.AccountID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to lock funds: %w", err)
+		}
+		if err := requireExactlyOne(rows, "lock account funds"); err != nil {
+			return err
 		}
 
 		// Create transaction record
@@ -158,6 +182,10 @@ func (s *PayoutService) RequestPayout(ctx context.Context, req RequestPayoutRequ
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create transaction: %w", err)
+		}
+
+		if err := s.audit.Write(ctx, qtx, "transaction", transactionID, nil, "created", "", domain.TxStatusPending, metadata); err != nil {
+			return err
 		}
 
 		// Create payout record
@@ -189,8 +217,6 @@ func (s *PayoutService) RequestPayout(ctx context.Context, req RequestPayoutRequ
 // ProcessPayouts processes a batch of pending payouts.
 // It fetches pending payouts using SKIP LOCKED, calls the gateway,
 // and updates the payout status and ledger accordingly.
-//
-// This method is safe for concurrent workers thanks to FOR UPDATE SKIP LOCKED.
 func (s *PayoutService) ProcessPayouts(ctx context.Context, batchSize int32) error {
 	if err := s.recoverStaleProcessingPayouts(ctx, batchSize); err != nil {
 		return err
@@ -236,7 +262,14 @@ func (s *PayoutService) ProcessPayouts(ctx context.Context, batchSize int32) err
 			continue
 		}
 
-		s.handlePayoutSuccess(ctx, payoutID, accountID, payout.AmountMicros, payout.Currency, payout.TransactionID, gatewayRef)
+		if err := s.handlePayoutSuccess(ctx, payoutID, accountID, payout.AmountMicros, payout.Currency, payout.TransactionID, gatewayRef); err != nil {
+			zap.L().Error(
+				"payout succeeded at gateway but local finalization failed; moved to manual review",
+				zap.Error(err),
+				zap.String("payout_id", payoutID.String()),
+				zap.String("gateway_ref", gatewayRef),
+			)
+		}
 	}
 
 	return nil
@@ -255,18 +288,19 @@ func (s *PayoutService) recoverStaleProcessingPayouts(ctx context.Context, batch
 			return fmt.Errorf("load stale processing payouts: %w", err)
 		}
 		for _, payout := range stale {
-			if err := qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+			rows, err := qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
 				Status:     domain.PayoutStatusPending,
 				GatewayRef: nil,
 				ID:         payout.ID,
-			}); err != nil {
+			})
+			if err != nil {
 				return fmt.Errorf("requeue stale payout %s: %w", repository.FromPgUUID(payout.ID), err)
 			}
-			if err := qtx.UpdateTransactionStatus(ctx, repository.UpdateTransactionStatusParams{
-				Status: domain.TxStatusPending,
-				ID:     payout.TransactionID,
-			}); err != nil {
-				return fmt.Errorf("requeue stale payout transaction %s: %w", repository.FromPgUUID(payout.TransactionID), err)
+			if err := requireExactlyOne(rows, "requeue stale payout"); err != nil {
+				return err
+			}
+			if err := transitionTransactionState(ctx, qtx, s.audit, repository.FromPgUUID(payout.TransactionID), domain.TxStatusPending, nil, "requeue_stale", nil); err != nil {
+				return fmt.Errorf("transition stale payout transaction %s: %w", repository.FromPgUUID(payout.TransactionID), err)
 			}
 		}
 		return nil
@@ -287,18 +321,19 @@ func (s *PayoutService) requeueClaimedPayouts(ctx context.Context, payouts []rep
 	}
 	return s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
 		for _, payout := range payouts {
-			if err := qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+			rows, err := qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
 				Status:     domain.PayoutStatusPending,
 				GatewayRef: nil,
 				ID:         payout.ID,
-			}); err != nil {
+			})
+			if err != nil {
 				return fmt.Errorf("requeue payout %s: %w", repository.FromPgUUID(payout.ID), err)
 			}
-			if err := qtx.UpdateTransactionStatus(ctx, repository.UpdateTransactionStatusParams{
-				Status: domain.TxStatusPending,
-				ID:     payout.TransactionID,
-			}); err != nil {
-				return fmt.Errorf("requeue transaction %s: %w", repository.FromPgUUID(payout.TransactionID), err)
+			if err := requireExactlyOne(rows, "requeue claimed payout"); err != nil {
+				return err
+			}
+			if err := transitionTransactionState(ctx, qtx, s.audit, repository.FromPgUUID(payout.TransactionID), domain.TxStatusPending, nil, "requeue_claimed", nil); err != nil {
+				return fmt.Errorf("transition claimed transaction %s: %w", repository.FromPgUUID(payout.TransactionID), err)
 			}
 		}
 		return nil
@@ -316,7 +351,7 @@ func (s *PayoutService) claimPendingPayouts(ctx context.Context, batchSize int32
 
 		for i, payout := range payouts {
 			payouts[i].Status = domain.PayoutStatusProcessing
-			err = queries.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+			rows, err := queries.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
 				Status:     domain.PayoutStatusProcessing,
 				GatewayRef: nil,
 				ID:         payout.ID,
@@ -324,13 +359,12 @@ func (s *PayoutService) claimPendingPayouts(ctx context.Context, batchSize int32
 			if err != nil {
 				return fmt.Errorf("failed to mark payout processing: %w", err)
 			}
+			if err := requireExactlyOne(rows, "mark payout processing"); err != nil {
+				return err
+			}
 
-			err = queries.UpdateTransactionStatus(ctx, repository.UpdateTransactionStatusParams{
-				Status: domain.TxStatusProcessing,
-				ID:     payout.TransactionID,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to update transaction status: %w", err)
+			if err := transitionTransactionState(ctx, queries, s.audit, repository.FromPgUUID(payout.TransactionID), domain.TxStatusProcessing, nil, "processing_started", nil); err != nil {
+				return fmt.Errorf("failed to transition transaction status: %w", err)
 			}
 		}
 		return nil
@@ -341,26 +375,27 @@ func (s *PayoutService) claimPendingPayouts(ctx context.Context, batchSize int32
 	return payouts, nil
 }
 
-// handlePayoutSuccess handles a successful payout from the gateway.
-func (s *PayoutService) handlePayoutSuccess(ctx context.Context, payoutID, accountID uuid.UUID, amount int64, currency string, transactionID pgtype.UUID, gatewayRef string) {
+// handlePayoutSuccess finalizes accounting for a successful gateway payout.
+// If local finalization fails after gateway success, the payout is moved to MANUAL_REVIEW
+// and funds remain locked to avoid accidental double spend/retry.
+func (s *PayoutService) handlePayoutSuccess(ctx context.Context, payoutID, accountID uuid.UUID, amount int64, currency string, transactionID pgtype.UUID, gatewayRef string) error {
 	err := s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
-		// 1. Deduct locked funds from balance (debits both balance and locked_micros)
-		err := qtx.DeductLockedFunds(ctx, repository.DeductLockedFundsParams{
+		rows, err := qtx.DeductLockedFunds(ctx, repository.DeductLockedFundsParams{
 			LockedMicros: amount,
 			ID:           repository.ToPgUUID(accountID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to deduct locked funds: %w", err)
 		}
+		if err := requireExactlyOne(rows, "deduct locked payout funds"); err != nil {
+			return err
+		}
 
-		// 2. Get system account for this currency
 		systemAccountID, err := getSystemAccountID(currency)
 		if err != nil {
 			return fmt.Errorf("failed to get system account: %w", err)
 		}
 
-		// 3. Create double-entry ledger entries
-		// Entry 1: Debit User (funds leaving the system)
 		_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
 			ID:            repository.ToPgUUID(uuid.New()),
 			TransactionID: transactionID,
@@ -372,7 +407,6 @@ func (s *PayoutService) handlePayoutSuccess(ctx context.Context, payoutID, accou
 			return fmt.Errorf("failed to create user debit entry: %w", err)
 		}
 
-		// Entry 2: Credit System (to balance the ledger - system account is credited)
 		_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
 			ID:            repository.ToPgUUID(uuid.New()),
 			TransactionID: transactionID,
@@ -384,52 +418,56 @@ func (s *PayoutService) handlePayoutSuccess(ctx context.Context, payoutID, accou
 			return fmt.Errorf("failed to create system credit entry: %w", err)
 		}
 
-		// 4. Update system account balance to mirror the ledger credit
-		err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		rows, err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
 			Balance: amount,
 			ID:      repository.ToPgUUID(systemAccountID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to credit system account: %w", err)
 		}
-
-		// 5. Update transaction status to completed
-		err = qtx.UpdateTransactionStatus(ctx, repository.UpdateTransactionStatusParams{
-			Status: domain.TxStatusCompleted,
-			ID:     transactionID,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to update transaction status: %w", err)
+		if err := requireExactlyOne(rows, "credit system account"); err != nil {
+			return err
 		}
 
-		// 6. Update payout status to completed (retry after commit if needed)
+		if err := transitionTransactionState(ctx, qtx, s.audit, repository.FromPgUUID(transactionID), domain.TxStatusCompleted, nil, "payout_completed", nil); err != nil {
+			return fmt.Errorf("failed to transition transaction status: %w", err)
+		}
+
 		ref := gatewayRef
-		if err := qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+		rows, err = qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
 			Status:     domain.PayoutStatusCompleted,
 			GatewayRef: &ref,
 			ID:         repository.ToPgUUID(payoutID),
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("failed to update payout status: %w", err)
+		}
+		if err := requireExactlyOne(rows, "mark payout completed"); err != nil {
+			return err
 		}
 		return nil
 	})
 
 	if err != nil {
-		s.updatePayoutFailed(ctx, payoutID, err.Error())
-		return
+		s.markPayoutManualReview(ctx, payoutID, gatewayRef, err.Error())
+		return err
 	}
+	return nil
 }
 
 // handlePayoutFailure handles a failed payout from the gateway.
 func (s *PayoutService) handlePayoutFailure(ctx context.Context, payoutID, accountID uuid.UUID, amount int64, reason string) {
 	err := s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
 		// 1. Release locked funds
-		err := qtx.ReleaseAccountFunds(ctx, repository.ReleaseAccountFundsParams{
+		rows, err := qtx.ReleaseAccountFunds(ctx, repository.ReleaseAccountFundsParams{
 			LockedMicros: amount,
 			ID:           repository.ToPgUUID(accountID),
 		})
 		if err != nil {
 			return fmt.Errorf("release locked funds: %w", err)
+		}
+		if err := requireExactlyOne(rows, "release locked payout funds"); err != nil {
+			return err
 		}
 
 		// 2. Get transaction ID for this payout
@@ -438,23 +476,25 @@ func (s *PayoutService) handlePayoutFailure(ctx context.Context, payoutID, accou
 			return fmt.Errorf("load payout for failure handling: %w", err)
 		}
 
-		// 3. Update transaction status to failed
-		err = qtx.UpdateTransactionStatus(ctx, repository.UpdateTransactionStatusParams{
-			Status: domain.TxStatusFailed,
-			ID:     payoutRow.TransactionID,
-		})
-		if err != nil {
-			return fmt.Errorf("update transaction failed status: %w", err)
+		metadata, metaErr := marshalReasonMetadata(reason)
+		if metaErr != nil {
+			return fmt.Errorf("marshal payout failure metadata: %w", metaErr)
+		}
+		if err := transitionTransactionState(ctx, qtx, s.audit, repository.FromPgUUID(payoutRow.TransactionID), domain.TxStatusFailed, nil, "payout_failed", metadata); err != nil {
+			return fmt.Errorf("transition transaction failed status: %w", err)
 		}
 
 		// 4. Update payout status to failed
-		err = qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+		rows, err = qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
 			Status:     domain.PayoutStatusFailed,
 			GatewayRef: nil,
 			ID:         repository.ToPgUUID(payoutID),
 		})
 		if err != nil {
 			return fmt.Errorf("update payout failed status: %w", err)
+		}
+		if err := requireExactlyOne(rows, "mark payout failed"); err != nil {
+			return err
 		}
 
 		return nil
@@ -482,26 +522,82 @@ func (s *PayoutService) updatePayoutFailed(ctx context.Context, payoutID uuid.UU
 			zap.L().Warn("fallback released locked funds", zap.String("payout_id", payoutID.String()), zap.Int64("amount_micros", payoutRow.AmountMicros))
 		}
 
-		if err := queries.UpdateTransactionStatus(ctx, repository.UpdateTransactionStatusParams{
+		if rows, err := queries.UpdateTransactionStatus(ctx, repository.UpdateTransactionStatusParams{
 			Status: domain.TxStatusFailed,
 			ID:     payoutRow.TransactionID,
 		}); err != nil {
 			zap.L().Error("fallback transaction fail update failed", zap.Error(err), zap.String("payout_id", payoutID.String()))
+		} else if err := requireExactlyOne(rows, "fallback mark transaction failed"); err != nil {
+			zap.L().Error("fallback transaction fail update affected unexpected rows", zap.Error(err), zap.String("payout_id", payoutID.String()))
+		} else {
+			if err := s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
+				metadata, metaErr := marshalReasonMetadata(reason)
+				if metaErr != nil {
+					return fmt.Errorf("marshal payout failure fallback metadata: %w", metaErr)
+				}
+				return s.audit.Write(ctx, qtx, "transaction", repository.FromPgUUID(payoutRow.TransactionID), nil, "payout_failed_fallback", "", domain.TxStatusFailed, metadata)
+			}); err != nil {
+				zap.L().Error("fallback audit write failed", zap.Error(err), zap.String("payout_id", payoutID.String()))
+			}
 		}
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		zap.L().Error("fallback payout lookup failed", zap.Error(err), zap.String("payout_id", payoutID.String()))
 	}
 
-	if err := queries.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+	if rows, err := queries.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
 		Status:     domain.PayoutStatusFailed,
 		GatewayRef: nil,
 		ID:         repository.ToPgUUID(payoutID),
 	}); err != nil {
 		zap.L().Error("fallback payout fail update failed", zap.Error(err), zap.String("payout_id", payoutID.String()))
+	} else if err := requireExactlyOne(rows, "fallback mark payout failed"); err != nil {
+		zap.L().Error("fallback payout fail update affected unexpected rows", zap.Error(err), zap.String("payout_id", payoutID.String()))
 	}
 
 	zap.L().Warn("payout failure fallback executed", zap.String("payout_id", payoutID.String()), zap.String("reason", reason))
+}
+
+func (s *PayoutService) markPayoutManualReview(ctx context.Context, payoutID uuid.UUID, gatewayRef, reason string) {
+	queries := s.store.Queries()
+	ref := gatewayRef
+	if rows, err := queries.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+		Status:     domain.PayoutStatusManualReview,
+		GatewayRef: &ref,
+		ID:         repository.ToPgUUID(payoutID),
+	}); err != nil {
+		zap.L().Error("failed to mark payout manual review", zap.Error(err), zap.String("payout_id", payoutID.String()))
+		return
+	} else if err := requireExactlyOne(rows, "mark payout manual review"); err != nil {
+		zap.L().Error("mark payout manual review affected unexpected rows", zap.Error(err), zap.String("payout_id", payoutID.String()))
+		return
+	}
+	observability.IncrementManualReviewTransition("queued")
+
+	row, err := queries.GetPayout(ctx, repository.ToPgUUID(payoutID))
+	if err != nil {
+		zap.L().Warn("manual review audit skipped: payout read failed", zap.Error(err), zap.String("payout_id", payoutID.String()))
+		return
+	}
+	if err := s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
+		metadata, metaErr := marshalReasonMetadata(reason)
+		if metaErr != nil {
+			return fmt.Errorf("marshal manual review metadata: %w", metaErr)
+		}
+		return s.audit.Write(
+			ctx,
+			qtx,
+			"transaction",
+			repository.FromPgUUID(row.TransactionID),
+			nil,
+			"payout_manual_review",
+			domain.TxStatusProcessing,
+			domain.TxStatusProcessing,
+			metadata,
+		)
+	}); err != nil {
+		zap.L().Warn("manual review audit write failed", zap.Error(err), zap.String("payout_id", payoutID.String()))
+	}
 }
 
 // GetPayout retrieves a payout by ID.
@@ -526,6 +622,210 @@ func (s *PayoutService) GetPayout(ctx context.Context, payoutID uuid.UUID) (*mod
 		CreatedAt:     row.CreatedAt.Time,
 		UpdatedAt:     row.UpdatedAt.Time,
 	}, nil
+}
+
+func (s *PayoutService) ManualReviewQueueSize(ctx context.Context) (int64, error) {
+	count, err := s.store.Queries().CountPayoutsByStatus(ctx, domain.PayoutStatusManualReview)
+	if err != nil {
+		return 0, fmt.Errorf("count manual review payouts: %w", err)
+	}
+	return count, nil
+}
+
+// ListManualReviewPayouts returns payouts currently waiting for manual operator action.
+func (s *PayoutService) ListManualReviewPayouts(ctx context.Context, limit, offset int32) ([]models.Payout, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.store.Queries().GetPayoutsByStatus(ctx, repository.GetPayoutsByStatusParams{
+		Status: domain.PayoutStatusManualReview,
+		Limit:  limit,
+		Offset: offset,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list manual review payouts: %w", err)
+	}
+	out := make([]models.Payout, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, models.Payout{
+			ID:            repository.FromPgUUID(row.ID),
+			TransactionID: repository.FromPgUUID(row.TransactionID),
+			AccountID:     repository.FromPgUUID(row.AccountID),
+			AmountMicros:  row.AmountMicros,
+			Currency:      row.Currency,
+			Status:        row.Status,
+			GatewayRef:    row.GatewayRef,
+			CreatedAt:     row.CreatedAt.Time,
+			UpdatedAt:     row.UpdatedAt.Time,
+		})
+	}
+	return out, nil
+}
+
+// ResolveManualReviewPayout finalizes a payout stuck in MANUAL_REVIEW.
+func (s *PayoutService) ResolveManualReviewPayout(ctx context.Context, req ResolveManualReviewRequest) (*models.Payout, error) {
+	decision := ResolveManualReviewDecision(strings.ToLower(strings.TrimSpace(string(req.Decision))))
+	switch decision {
+	case DecisionConfirmSent, DecisionRefundFailed:
+	default:
+		return nil, ErrInvalidManualReviewDecision
+	}
+
+	err := s.store.RunInTx(ctx, func(qtx *repository.Queries) error {
+		payoutRow, err := qtx.GetPayoutForUpdate(ctx, repository.ToPgUUID(req.PayoutID))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrPayoutNotFound
+			}
+			return fmt.Errorf("get payout for update: %w", err)
+		}
+		if payoutRow.Status != domain.PayoutStatusManualReview {
+			return ErrPayoutNotInManualReview
+		}
+
+		transactionID := repository.FromPgUUID(payoutRow.TransactionID)
+		metadata, metaErr := marshalReasonMetadata(req.Reason)
+		if metaErr != nil {
+			return fmt.Errorf("marshal resolution metadata: %w", metaErr)
+		}
+
+		switch decision {
+		case DecisionConfirmSent:
+			if err := s.applyManualReviewConfirmation(ctx, qtx, payoutRow, transactionID, req.ActorID, metadata, req.GatewayRef); err != nil {
+				return err
+			}
+		case DecisionRefundFailed:
+			if err := s.applyManualReviewRefund(ctx, qtx, payoutRow, transactionID, req.ActorID, metadata); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	observability.IncrementManualReviewTransition(string(decision))
+	return s.GetPayout(ctx, req.PayoutID)
+}
+
+func (s *PayoutService) applyManualReviewConfirmation(
+	ctx context.Context,
+	qtx *repository.Queries,
+	payoutRow repository.Payout,
+	transactionID uuid.UUID,
+	actorID *uuid.UUID,
+	metadata []byte,
+	overrideGatewayRef *string,
+) error {
+	rows, err := qtx.DeductLockedFunds(ctx, repository.DeductLockedFundsParams{
+		LockedMicros: payoutRow.AmountMicros,
+		ID:           payoutRow.AccountID,
+	})
+	if err != nil {
+		return fmt.Errorf("manual-review confirm: deduct locked funds: %w", err)
+	}
+	if err := requireExactlyOne(rows, "manual-review deduct locked funds"); err != nil {
+		return err
+	}
+
+	systemAccountID, err := getSystemAccountID(payoutRow.Currency)
+	if err != nil {
+		return err
+	}
+	_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
+		ID:            repository.ToPgUUID(uuid.New()),
+		TransactionID: payoutRow.TransactionID,
+		AccountID:     payoutRow.AccountID,
+		Amount:        payoutRow.AmountMicros,
+		Direction:     domain.DirectionDebit,
+	})
+	if err != nil {
+		return fmt.Errorf("manual-review confirm: create user debit entry: %w", err)
+	}
+	_, err = qtx.CreateEntry(ctx, repository.CreateEntryParams{
+		ID:            repository.ToPgUUID(uuid.New()),
+		TransactionID: payoutRow.TransactionID,
+		AccountID:     repository.ToPgUUID(systemAccountID),
+		Amount:        payoutRow.AmountMicros,
+		Direction:     domain.DirectionCredit,
+	})
+	if err != nil {
+		return fmt.Errorf("manual-review confirm: create system credit entry: %w", err)
+	}
+	rows, err = qtx.UpdateAccountBalance(ctx, repository.UpdateAccountBalanceParams{
+		Balance: payoutRow.AmountMicros,
+		ID:      repository.ToPgUUID(systemAccountID),
+	})
+	if err != nil {
+		return fmt.Errorf("manual-review confirm: credit system account: %w", err)
+	}
+	if err := requireExactlyOne(rows, "manual-review credit system account"); err != nil {
+		return err
+	}
+
+	if err := transitionTransactionState(ctx, qtx, s.audit, transactionID, domain.TxStatusCompleted, actorID, "manual_review_confirmed", metadata); err != nil {
+		return fmt.Errorf("manual-review confirm: transition transaction: %w", err)
+	}
+
+	ref := payoutRow.GatewayRef
+	if overrideGatewayRef != nil && strings.TrimSpace(*overrideGatewayRef) != "" {
+		val := strings.TrimSpace(*overrideGatewayRef)
+		ref = &val
+	}
+	rows, err = qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+		Status:     domain.PayoutStatusCompleted,
+		GatewayRef: ref,
+		ID:         payoutRow.ID,
+	})
+	if err != nil {
+		return fmt.Errorf("manual-review confirm: update payout status: %w", err)
+	}
+	if err := requireExactlyOne(rows, "manual-review set payout completed"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *PayoutService) applyManualReviewRefund(
+	ctx context.Context,
+	qtx *repository.Queries,
+	payoutRow repository.Payout,
+	transactionID uuid.UUID,
+	actorID *uuid.UUID,
+	metadata []byte,
+) error {
+	rows, err := qtx.ReleaseAccountFundsSafe(ctx, repository.ReleaseAccountFundsSafeParams{
+		LockedMicros: payoutRow.AmountMicros,
+		ID:           payoutRow.AccountID,
+	})
+	if err != nil {
+		return fmt.Errorf("manual-review refund: release locked funds: %w", err)
+	}
+	if rows > 1 {
+		return fmt.Errorf("manual-review refund: released unexpected rows: %d", rows)
+	}
+
+	if err := transitionTransactionState(ctx, qtx, s.audit, transactionID, domain.TxStatusFailed, actorID, "manual_review_refunded", metadata); err != nil {
+		return fmt.Errorf("manual-review refund: transition transaction: %w", err)
+	}
+	rows, err = qtx.UpdatePayoutStatus(ctx, repository.UpdatePayoutStatusParams{
+		Status:     domain.PayoutStatusFailed,
+		GatewayRef: payoutRow.GatewayRef,
+		ID:         payoutRow.ID,
+	})
+	if err != nil {
+		return fmt.Errorf("manual-review refund: update payout status: %w", err)
+	}
+	if err := requireExactlyOne(rows, "manual-review set payout failed"); err != nil {
+		return err
+	}
+	return nil
 }
 
 type payoutMetadata struct {
@@ -553,4 +853,10 @@ func formatDestination(dest PayoutDestinationInput) string {
 		return dest.Name
 	}
 	return fmt.Sprintf("%s (%s)", dest.Name, dest.IBAN)
+}
+
+func marshalReasonMetadata(reason string) ([]byte, error) {
+	return json.Marshal(map[string]string{
+		"reason": reason,
+	})
 }
