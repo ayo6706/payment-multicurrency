@@ -25,9 +25,7 @@ func NewTransferHandler(svc *service.TransferService, repo *repository.Repositor
 func (h *TransferHandler) MakeInternalTransfer(w http.ResponseWriter, r *http.Request) {
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	if idempotencyKey == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Idempotency-Key header is required"})
+		RespondError(w, r, http.StatusBadRequest, "idempotency/missing-key", "Idempotency-Key header is required")
 		return
 	}
 
@@ -37,51 +35,47 @@ func (h *TransferHandler) MakeInternalTransfer(w http.ResponseWriter, r *http.Re
 		Amount        int64  `json:"amount"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-body", "Invalid request body")
 		return
 	}
 
 	fromID, err := uuid.Parse(req.FromAccountID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid from_account_id"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-from-account-id", "Invalid from_account_id")
 		return
 	}
 	toID, err := uuid.Parse(req.ToAccountID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid to_account_id"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-to-account-id", "Invalid to_account_id")
 		return
 	}
 	actorID, isAdmin, err := requestActor(r)
 	if err != nil {
-		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		RespondError(w, r, http.StatusUnauthorized, "auth/unauthorized", "Unauthorized")
 		return
 	}
 	fromAcc, err := h.repo.GetAccount(r.Context(), fromID)
 	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Invalid from_account_id")
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-from-account-id", "Invalid from_account_id")
 		return
 	}
 	if !isAdmin && fromAcc.UserID != actorID {
-		RespondError(w, http.StatusForbidden, "insufficient permissions")
+		RespondError(w, r, http.StatusForbidden, "auth/insufficient-permissions", "insufficient permissions")
 		return
 	}
 
 	tx, err := h.svc.Transfer(r.Context(), fromID, toID, req.Amount, idempotencyKey)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
 		if err == models.ErrInsufficientFunds {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			RespondError(w, r, http.StatusBadRequest, "transfer/insufficient-funds", err.Error())
 			return
 		}
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Transfer failed: " + err.Error()})
+		if errors.Is(err, service.ErrInvalidAmount) || errors.Is(err, service.ErrReferenceRequired) || errors.Is(err, service.ErrSameAccountTransfer) || errors.Is(err, service.ErrCurrencyMismatch) {
+			RespondError(w, r, http.StatusBadRequest, "transfer/invalid-request", err.Error())
+			return
+		}
+		zap.L().Error("internal transfer failed", zap.Error(err), zap.String("from_account_id", fromID.String()), zap.String("to_account_id", toID.String()))
+		RespondError(w, r, http.StatusInternalServerError, "transfer/internal-failure", "Transfer failed")
 		return
 	}
 
@@ -93,9 +87,7 @@ func (h *TransferHandler) MakeInternalTransfer(w http.ResponseWriter, r *http.Re
 func (h *TransferHandler) MakeExchangeTransfer(w http.ResponseWriter, r *http.Request) {
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	if idempotencyKey == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Idempotency-Key header is required"})
+		RespondError(w, r, http.StatusBadRequest, "idempotency/missing-key", "Idempotency-Key header is required")
 		return
 	}
 
@@ -107,9 +99,7 @@ func (h *TransferHandler) MakeExchangeTransfer(w http.ResponseWriter, r *http.Re
 		ToCurrency    string `json:"to_currency"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-body", "Invalid request body")
 		return
 	}
 
@@ -118,44 +108,36 @@ func (h *TransferHandler) MakeExchangeTransfer(w http.ResponseWriter, r *http.Re
 	req.ToCurrency = strings.TrimSpace(req.ToCurrency)
 
 	if req.Amount <= 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Amount must be greater than zero"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-amount", "Amount must be greater than zero")
 		return
 	}
 	if req.FromCurrency == "" || req.ToCurrency == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "from_currency and to_currency are required"})
+		RespondError(w, r, http.StatusBadRequest, "request/missing-currency", "from_currency and to_currency are required")
 		return
 	}
 
 	fromID, err := uuid.Parse(req.FromAccountID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid from_account_id"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-from-account-id", "Invalid from_account_id")
 		return
 	}
 	toID, err := uuid.Parse(req.ToAccountID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid to_account_id"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-to-account-id", "Invalid to_account_id")
 		return
 	}
 	actorID, isAdmin, err := requestActor(r)
 	if err != nil {
-		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		RespondError(w, r, http.StatusUnauthorized, "auth/unauthorized", "Unauthorized")
 		return
 	}
 	fromAcc, err := h.repo.GetAccount(r.Context(), fromID)
 	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Invalid from_account_id")
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-from-account-id", "Invalid from_account_id")
 		return
 	}
 	if !isAdmin && fromAcc.UserID != actorID {
-		RespondError(w, http.StatusForbidden, "insufficient permissions")
+		RespondError(w, r, http.StatusForbidden, "auth/insufficient-permissions", "insufficient permissions")
 		return
 	}
 
@@ -170,23 +152,23 @@ func (h *TransferHandler) MakeExchangeTransfer(w http.ResponseWriter, r *http.Re
 
 	tx, err := h.svc.TransferExchange(r.Context(), cmd)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
 		// Map errors to status codes
 		if errors.Is(err, models.ErrInsufficientFunds) {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			RespondError(w, r, http.StatusBadRequest, "transfer/insufficient-funds", err.Error())
 			return
 		}
 		if errors.Is(err, models.ErrUnsupportedCurrency) || errors.Is(err, models.ErrRateUnavailable) {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			RespondError(w, r, http.StatusBadRequest, "transfer/exchange-invalid-request", err.Error())
+			return
+		}
+		if errors.Is(err, service.ErrInvalidAmount) || errors.Is(err, service.ErrReferenceRequired) || errors.Is(err, service.ErrSameAccountTransfer) || errors.Is(err, service.ErrSameCurrencyExchange) {
+			RespondError(w, r, http.StatusBadRequest, "transfer/exchange-invalid-request", err.Error())
 			return
 		}
 
 		zap.L().Error("exchange transfer failed", zap.Error(err))
 
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Exchange failed"})
+		RespondError(w, r, http.StatusInternalServerError, "transfer/exchange-failed", "Exchange failed")
 		return
 	}
 
