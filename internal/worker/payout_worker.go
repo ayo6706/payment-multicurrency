@@ -3,8 +3,10 @@ package worker
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/ayo6706/payment-multicurrency/internal/observability"
 	"github.com/ayo6706/payment-multicurrency/internal/service"
 	"go.uber.org/zap"
 )
@@ -17,6 +19,7 @@ type PayoutWorker struct {
 	pollInterval  time.Duration
 	batchSize     int32
 	stopCh        chan struct{}
+	stopOnce      sync.Once
 }
 
 // NewPayoutWorker creates a new PayoutWorker instance.
@@ -65,15 +68,27 @@ func (w *PayoutWorker) Start(ctx context.Context) {
 
 // Stop signals the worker to stop.
 func (w *PayoutWorker) Stop() {
-	close(w.stopCh)
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+	})
 }
 
 // processBatch processes a single batch of pending payouts.
 func (w *PayoutWorker) processBatch(ctx context.Context) {
 	err := w.payoutService.ProcessPayouts(ctx, w.batchSize)
 	if err != nil {
+		observability.IncrementWorkerRun("payout", "failed")
 		zap.L().Error("payout worker batch failed", zap.Error(err))
+	} else {
+		observability.IncrementWorkerRun("payout", "success")
 	}
+
+	queueSize, queueErr := w.payoutService.ManualReviewQueueSize(ctx)
+	if queueErr != nil {
+		zap.L().Warn("payout worker failed to refresh manual review queue size", zap.Error(queueErr))
+		return
+	}
+	observability.SetManualReviewQueueSize(queueSize)
 }
 
 // ProcessOnce processes a single batch immediately.
