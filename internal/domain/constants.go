@@ -16,14 +16,16 @@ const (
 	TxTypePayout   = "payout"
 	TxTypeDeposit  = "deposit"
 
-	TxStatusCompleted  = "completed"
-	TxStatusFailed     = "failed"
-	TxStatusPending    = "pending"
-	TxStatusProcessing = "processing"
+	TxStatusCompleted  = "COMPLETED"
+	TxStatusFailed     = "FAILED"
+	TxStatusPending    = "PENDING"
+	TxStatusProcessing = "PROCESSING"
+	TxStatusReversed   = "REVERSED"
 
 	// Payout statuses
-	PayoutStatusPending    = "PENDING"
-	PayoutStatusProcessing = "PROCESSING"
-	PayoutStatusCompleted  = "COMPLETED"
-	PayoutStatusFailed     = "FAILED"
+	PayoutStatusPending      = "PENDING"
+	PayoutStatusProcessing   = "PROCESSING"
+	PayoutStatusCompleted    = "COMPLETED"
+	PayoutStatusFailed       = "FAILED"
+	PayoutStatusManualReview = "MANUAL_REVIEW"
 )
