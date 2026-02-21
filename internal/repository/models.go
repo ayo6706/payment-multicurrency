@@ -9,57 +9,69 @@ import (
 )
 
 type Account struct {
-	ID           pgtype.UUID      `db:"id" json:"id"`
-	UserID       pgtype.UUID      `db:"user_id" json:"user_id"`
-	Currency     string           `db:"currency" json:"currency"`
-	Balance      int64            `db:"balance" json:"balance"`
-	CreatedAt    pgtype.Timestamp `db:"created_at" json:"created_at"`
-	LockedMicros int64            `db:"locked_micros" json:"locked_micros"`
+	ID           pgtype.UUID        `db:"id" json:"id"`
+	UserID       pgtype.UUID        `db:"user_id" json:"user_id"`
+	Currency     string             `db:"currency" json:"currency"`
+	Balance      int64              `db:"balance" json:"balance"`
+	CreatedAt    pgtype.Timestamptz `db:"created_at" json:"created_at"`
+	LockedMicros int64              `db:"locked_micros" json:"locked_micros"`
+}
+
+type AuditLog struct {
+	ID         int64              `db:"id" json:"id"`
+	EntityType string             `db:"entity_type" json:"entity_type"`
+	EntityID   pgtype.UUID        `db:"entity_id" json:"entity_id"`
+	ActorID    pgtype.UUID        `db:"actor_id" json:"actor_id"`
+	Action     string             `db:"action" json:"action"`
+	PrevState  *string            `db:"prev_state" json:"prev_state"`
+	NextState  *string            `db:"next_state" json:"next_state"`
+	Metadata   []byte             `db:"metadata" json:"metadata"`
+	CreatedAt  pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
 
 type EntriesDefault struct {
-	ID            pgtype.UUID      `db:"id" json:"id"`
-	TransactionID pgtype.UUID      `db:"transaction_id" json:"transaction_id"`
-	AccountID     pgtype.UUID      `db:"account_id" json:"account_id"`
-	Amount        int64            `db:"amount" json:"amount"`
-	Direction     string           `db:"direction" json:"direction"`
-	CreatedAt     pgtype.Timestamp `db:"created_at" json:"created_at"`
+	ID            pgtype.UUID        `db:"id" json:"id"`
+	TransactionID pgtype.UUID        `db:"transaction_id" json:"transaction_id"`
+	AccountID     pgtype.UUID        `db:"account_id" json:"account_id"`
+	Amount        int64              `db:"amount" json:"amount"`
+	Direction     string             `db:"direction" json:"direction"`
+	CreatedAt     pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
 
 type EntriesY2026m01 struct {
-	ID            pgtype.UUID      `db:"id" json:"id"`
-	TransactionID pgtype.UUID      `db:"transaction_id" json:"transaction_id"`
-	AccountID     pgtype.UUID      `db:"account_id" json:"account_id"`
-	Amount        int64            `db:"amount" json:"amount"`
-	Direction     string           `db:"direction" json:"direction"`
-	CreatedAt     pgtype.Timestamp `db:"created_at" json:"created_at"`
+	ID            pgtype.UUID        `db:"id" json:"id"`
+	TransactionID pgtype.UUID        `db:"transaction_id" json:"transaction_id"`
+	AccountID     pgtype.UUID        `db:"account_id" json:"account_id"`
+	Amount        int64              `db:"amount" json:"amount"`
+	Direction     string             `db:"direction" json:"direction"`
+	CreatedAt     pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
 
 type EntriesY2026m02 struct {
-	ID            pgtype.UUID      `db:"id" json:"id"`
-	TransactionID pgtype.UUID      `db:"transaction_id" json:"transaction_id"`
-	AccountID     pgtype.UUID      `db:"account_id" json:"account_id"`
-	Amount        int64            `db:"amount" json:"amount"`
-	Direction     string           `db:"direction" json:"direction"`
-	CreatedAt     pgtype.Timestamp `db:"created_at" json:"created_at"`
+	ID            pgtype.UUID        `db:"id" json:"id"`
+	TransactionID pgtype.UUID        `db:"transaction_id" json:"transaction_id"`
+	AccountID     pgtype.UUID        `db:"account_id" json:"account_id"`
+	Amount        int64              `db:"amount" json:"amount"`
+	Direction     string             `db:"direction" json:"direction"`
+	CreatedAt     pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
 
 type EntriesY2026m03 struct {
-	ID            pgtype.UUID      `db:"id" json:"id"`
-	TransactionID pgtype.UUID      `db:"transaction_id" json:"transaction_id"`
-	AccountID     pgtype.UUID      `db:"account_id" json:"account_id"`
-	Amount        int64            `db:"amount" json:"amount"`
-	Direction     string           `db:"direction" json:"direction"`
-	CreatedAt     pgtype.Timestamp `db:"created_at" json:"created_at"`
+	ID            pgtype.UUID        `db:"id" json:"id"`
+	TransactionID pgtype.UUID        `db:"transaction_id" json:"transaction_id"`
+	AccountID     pgtype.UUID        `db:"account_id" json:"account_id"`
+	Amount        int64              `db:"amount" json:"amount"`
+	Direction     string             `db:"direction" json:"direction"`
+	CreatedAt     pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
 
 type Entry struct {
-	ID            pgtype.UUID      `db:"id" json:"id"`
-	TransactionID pgtype.UUID      `db:"transaction_id" json:"transaction_id"`
-	AccountID     pgtype.UUID      `db:"account_id" json:"account_id"`
-	Amount        int64            `db:"amount" json:"amount"`
-	Direction     string           `db:"direction" json:"direction"`
-	CreatedAt     pgtype.Timestamp `db:"created_at" json:"created_at"`
+	ID            pgtype.UUID        `db:"id" json:"id"`
+	TransactionID pgtype.UUID        `db:"transaction_id" json:"transaction_id"`
+	AccountID     pgtype.UUID        `db:"account_id" json:"account_id"`
+	Amount        int64              `db:"amount" json:"amount"`
+	Direction     string             `db:"direction" json:"direction"`
+	CreatedAt     pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
 
 type IdempotencyKey struct {
@@ -88,21 +100,21 @@ type Payout struct {
 }
 
 type Transaction struct {
-	ID          pgtype.UUID      `db:"id" json:"id"`
-	Amount      int64            `db:"amount" json:"amount"`
-	Currency    string           `db:"currency" json:"currency"`
-	Type        string           `db:"type" json:"type"`
-	Status      string           `db:"status" json:"status"`
-	ReferenceID string           `db:"reference_id" json:"reference_id"`
-	CreatedAt   pgtype.Timestamp `db:"created_at" json:"created_at"`
-	FxRate      pgtype.Numeric   `db:"fx_rate" json:"fx_rate"`
-	Metadata    []byte           `db:"metadata" json:"metadata"`
+	ID          pgtype.UUID        `db:"id" json:"id"`
+	Amount      int64              `db:"amount" json:"amount"`
+	Currency    string             `db:"currency" json:"currency"`
+	Type        string             `db:"type" json:"type"`
+	Status      string             `db:"status" json:"status"`
+	ReferenceID string             `db:"reference_id" json:"reference_id"`
+	CreatedAt   pgtype.Timestamptz `db:"created_at" json:"created_at"`
+	FxRate      pgtype.Numeric     `db:"fx_rate" json:"fx_rate"`
+	Metadata    []byte             `db:"metadata" json:"metadata"`
 }
 
 type User struct {
-	ID        pgtype.UUID      `db:"id" json:"id"`
-	Username  string           `db:"username" json:"username"`
-	Email     string           `db:"email" json:"email"`
-	Role      string           `db:"role" json:"role"`
-	CreatedAt pgtype.Timestamp `db:"created_at" json:"created_at"`
+	ID        pgtype.UUID        `db:"id" json:"id"`
+	Username  string             `db:"username" json:"username"`
+	Email     string             `db:"email" json:"email"`
+	Role      string             `db:"role" json:"role"`
+	CreatedAt pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
