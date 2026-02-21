@@ -25,12 +25,12 @@ SELECT id, username, email, role, created_at
 FROM users 
 WHERE id = $1;
 
--- name: LockAccountFunds :exec
+-- name: LockAccountFunds :execrows
 UPDATE accounts
 SET locked_micros = locked_micros + $1
 WHERE id = $2;
 
--- name: ReleaseAccountFunds :exec
+-- name: ReleaseAccountFunds :execrows
 UPDATE accounts
 SET locked_micros = locked_micros - $1
 WHERE id = $2;
@@ -40,14 +40,9 @@ UPDATE accounts
 SET locked_micros = locked_micros - $1
 WHERE id = $2 AND locked_micros >= $1;
 
--- name: DeductLockedFunds :exec
+-- name: DeductLockedFunds :execrows
 UPDATE accounts
 SET locked_micros = locked_micros - $1, balance = balance - $1
-WHERE id = $2;
-
--- name: CreditAccount :exec
-UPDATE accounts
-SET balance = balance + $1
 WHERE id = $2;
 
 -- name: GetAccountBalanceAndLocked :one

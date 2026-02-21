@@ -24,14 +24,14 @@ type CreateAccountParams struct {
 	Balance  int64       `db:"balance" json:"balance"`
 }
 
-func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (pgtype.Timestamp, error) {
+func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (pgtype.Timestamptz, error) {
 	row := q.db.QueryRow(ctx, createAccount,
 		arg.ID,
 		arg.UserID,
 		arg.Currency,
 		arg.Balance,
 	)
-	var created_at pgtype.Timestamp
+	var created_at pgtype.Timestamptz
 	err := row.Scan(&created_at)
 	return created_at, err
 }
@@ -49,35 +49,19 @@ type CreateUserParams struct {
 	Role     string      `db:"role" json:"role"`
 }
 
-func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (pgtype.Timestamp, error) {
+func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (pgtype.Timestamptz, error) {
 	row := q.db.QueryRow(ctx, createUser,
 		arg.ID,
 		arg.Username,
 		arg.Email,
 		arg.Role,
 	)
-	var created_at pgtype.Timestamp
+	var created_at pgtype.Timestamptz
 	err := row.Scan(&created_at)
 	return created_at, err
 }
 
-const creditAccount = `-- name: CreditAccount :exec
-UPDATE accounts
-SET balance = balance + $1
-WHERE id = $2
-`
-
-type CreditAccountParams struct {
-	Balance int64       `db:"balance" json:"balance"`
-	ID      pgtype.UUID `db:"id" json:"id"`
-}
-
-func (q *Queries) CreditAccount(ctx context.Context, arg CreditAccountParams) error {
-	_, err := q.db.Exec(ctx, creditAccount, arg.Balance, arg.ID)
-	return err
-}
-
-const deductLockedFunds = `-- name: DeductLockedFunds :exec
+const deductLockedFunds = `-- name: DeductLockedFunds :execrows
 UPDATE accounts
 SET locked_micros = locked_micros - $1, balance = balance - $1
 WHERE id = $2
@@ -88,9 +72,12 @@ type DeductLockedFundsParams struct {
 	ID           pgtype.UUID `db:"id" json:"id"`
 }
 
-func (q *Queries) DeductLockedFunds(ctx context.Context, arg DeductLockedFundsParams) error {
-	_, err := q.db.Exec(ctx, deductLockedFunds, arg.LockedMicros, arg.ID)
-	return err
+func (q *Queries) DeductLockedFunds(ctx context.Context, arg DeductLockedFundsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deductLockedFunds, arg.LockedMicros, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getAccount = `-- name: GetAccount :one
@@ -100,11 +87,11 @@ WHERE id = $1
 `
 
 type GetAccountRow struct {
-	ID        pgtype.UUID      `db:"id" json:"id"`
-	UserID    pgtype.UUID      `db:"user_id" json:"user_id"`
-	Currency  string           `db:"currency" json:"currency"`
-	Balance   int64            `db:"balance" json:"balance"`
-	CreatedAt pgtype.Timestamp `db:"created_at" json:"created_at"`
+	ID        pgtype.UUID        `db:"id" json:"id"`
+	UserID    pgtype.UUID        `db:"user_id" json:"user_id"`
+	Currency  string             `db:"currency" json:"currency"`
+	Balance   int64              `db:"balance" json:"balance"`
+	CreatedAt pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }
 
 func (q *Queries) GetAccount(ctx context.Context, id pgtype.UUID) (GetAccountRow, error) {
@@ -197,7 +184,7 @@ func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
 	return i, err
 }
 
-const lockAccountFunds = `-- name: LockAccountFunds :exec
+const lockAccountFunds = `-- name: LockAccountFunds :execrows
 UPDATE accounts
 SET locked_micros = locked_micros + $1
 WHERE id = $2
@@ -208,12 +195,15 @@ type LockAccountFundsParams struct {
 	ID           pgtype.UUID `db:"id" json:"id"`
 }
 
-func (q *Queries) LockAccountFunds(ctx context.Context, arg LockAccountFundsParams) error {
-	_, err := q.db.Exec(ctx, lockAccountFunds, arg.LockedMicros, arg.ID)
-	return err
+func (q *Queries) LockAccountFunds(ctx context.Context, arg LockAccountFundsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, lockAccountFunds, arg.LockedMicros, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const releaseAccountFunds = `-- name: ReleaseAccountFunds :exec
+const releaseAccountFunds = `-- name: ReleaseAccountFunds :execrows
 UPDATE accounts
 SET locked_micros = locked_micros - $1
 WHERE id = $2
@@ -224,9 +214,12 @@ type ReleaseAccountFundsParams struct {
 	ID           pgtype.UUID `db:"id" json:"id"`
 }
 
-func (q *Queries) ReleaseAccountFunds(ctx context.Context, arg ReleaseAccountFundsParams) error {
-	_, err := q.db.Exec(ctx, releaseAccountFunds, arg.LockedMicros, arg.ID)
-	return err
+func (q *Queries) ReleaseAccountFunds(ctx context.Context, arg ReleaseAccountFundsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseAccountFunds, arg.LockedMicros, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const releaseAccountFundsSafe = `-- name: ReleaseAccountFundsSafe :execrows
