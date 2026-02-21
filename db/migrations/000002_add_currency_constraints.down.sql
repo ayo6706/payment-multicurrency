@@ -1,1 +1,1 @@
-ALTER TABLE accounts DROP CONSTRAINT currency_check;
+ALTER TABLE accounts DROP CONSTRAINT IF EXISTS currency_check;

@@ -1,5 +1,5 @@
 -- create payouts table
-CREATE TABLE payouts (
+CREATE TABLE IF NOT EXISTS payouts (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   transaction_id  UUID NOT NULL REFERENCES transactions(id),
   account_id      UUID NOT NULL REFERENCES accounts(id),

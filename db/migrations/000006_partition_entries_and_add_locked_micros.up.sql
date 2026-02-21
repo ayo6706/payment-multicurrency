@@ -10,7 +10,7 @@ CREATE TABLE entries (
     account_id UUID NOT NULL REFERENCES accounts(id),
     amount BIGINT NOT NULL,
     direction VARCHAR(10) NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
 
