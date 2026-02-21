@@ -25,8 +25,9 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 
 	ensureLockedMicrosColumn(t, db)
 	ensurePayoutsTable(t, db)
+	ensureAuditLogTable(t, db)
 
-	for _, table := range []string{"entries", "transactions", "payouts", "accounts", "users"} {
+	for _, table := range []string{"audit_log", "entries", "transactions", "payouts", "accounts", "users"} {
 		stmt := fmt.Sprintf("TRUNCATE TABLE %s CASCADE", table)
 		if _, err := db.Exec(context.Background(), stmt); err != nil {
 			if strings.Contains(err.Error(), "does not exist") {
@@ -96,6 +97,27 @@ func ensurePayoutsTable(t *testing.T, db *pgxpool.Pool) {
 	`
 	if _, err := db.Exec(context.Background(), sql); err != nil {
 		t.Fatalf("failed to ensure payouts table: %v", err)
+	}
+}
+
+func ensureAuditLogTable(t *testing.T, db *pgxpool.Pool) {
+	t.Helper()
+
+	sql := `
+		CREATE TABLE IF NOT EXISTS audit_log (
+			id BIGSERIAL PRIMARY KEY,
+			entity_type TEXT NOT NULL,
+			entity_id UUID NOT NULL,
+			actor_id UUID,
+			action TEXT NOT NULL,
+			prev_state TEXT,
+			next_state TEXT,
+			metadata JSONB,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+	`
+	if _, err := db.Exec(context.Background(), sql); err != nil {
+		t.Fatalf("failed to ensure audit_log table: %v", err)
 	}
 }
 
