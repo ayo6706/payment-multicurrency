@@ -1,0 +1,9 @@
+.git
+.gitignore
+server.log
+*.md
+*.ps1
+.env
+bin
+tmp
+*.out
