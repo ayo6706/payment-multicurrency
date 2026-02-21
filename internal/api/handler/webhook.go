@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"io"
 	"net/http"
 
@@ -26,7 +27,7 @@ func (h *WebhookHandler) HandleDepositWebhook(w http.ResponseWriter, r *http.Req
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		zap.L().Error("read webhook body failed", zap.Error(err))
-		RespondError(w, http.StatusBadRequest, "Failed to read request body")
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-body", "Failed to read request body")
 		return
 	}
 
@@ -36,11 +37,19 @@ func (h *WebhookHandler) HandleDepositWebhook(w http.ResponseWriter, r *http.Req
 	resp, err := h.webhookSvc.HandleDepositWebhook(r.Context(), body, signature)
 	if err != nil {
 		zap.L().Error("process deposit webhook failed", zap.Error(err))
-		if err.Error() == "invalid signature" {
-			RespondError(w, http.StatusUnauthorized, "Invalid signature")
+		if errors.Is(err, service.ErrInvalidSignature) {
+			RespondError(w, r, http.StatusUnauthorized, "webhook/invalid-signature", "Invalid signature")
 			return
 		}
-		RespondError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, service.ErrDepositInProgress) {
+			RespondError(w, r, http.StatusConflict, "webhook/in-progress", "Deposit for this reference is still processing")
+			return
+		}
+		if errors.Is(err, service.ErrDepositPayloadMismatch) {
+			RespondError(w, r, http.StatusConflict, "webhook/reference-mismatch", "Reference already used with different payload")
+			return
+		}
+		RespondError(w, r, http.StatusBadRequest, "webhook/invalid-request", "Invalid webhook payload")
 		return
 	}
 

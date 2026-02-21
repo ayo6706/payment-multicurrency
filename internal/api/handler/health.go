@@ -31,13 +31,13 @@ func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := h.db.Ping(ctx); err != nil {
-		RespondError(w, http.StatusServiceUnavailable, "database unavailable")
+		RespondError(w, r, http.StatusServiceUnavailable, "health/database-unavailable", "database unavailable")
 		return
 	}
 
 	if h.redis != nil {
 		if err := h.redis.Ping(ctx).Err(); err != nil {
-			RespondError(w, http.StatusServiceUnavailable, "redis unavailable")
+			RespondError(w, r, http.StatusServiceUnavailable, "health/redis-unavailable", "redis unavailable")
 			return
 		}
 	}
