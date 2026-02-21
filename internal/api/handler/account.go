@@ -8,6 +8,7 @@ import (
 	"github.com/ayo6706/payment-multicurrency/internal/service"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 type AccountHandler struct {
@@ -21,26 +22,25 @@ func NewAccountHandler(svc *service.AccountService) *AccountHandler {
 func (h *AccountHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	actorID, isAdmin, err := requestActor(r)
 	if err != nil {
-		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		RespondError(w, r, http.StatusUnauthorized, "auth/unauthorized", "Unauthorized")
 		return
 	}
 
 	accountIDStr := chi.URLParam(r, "id")
 	accountID, err := uuid.Parse(accountIDStr)
 	if err != nil {
-		http.Error(w, "Invalid account ID", http.StatusBadRequest)
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-account-id", "Invalid account ID")
 		return
 	}
 
 	account, err := h.svc.GetBalance(r.Context(), accountID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to get balance: " + err.Error()})
+		zap.L().Error("get balance failed", zap.Error(err), zap.String("account_id", accountID.String()))
+		RespondError(w, r, http.StatusInternalServerError, "account/balance-read-failed", "Failed to get balance")
 		return
 	}
 	if !isAdmin && account.UserID != actorID {
-		RespondError(w, http.StatusForbidden, "insufficient permissions")
+		RespondError(w, r, http.StatusForbidden, "auth/insufficient-permissions", "insufficient permissions")
 		return
 	}
 
@@ -51,25 +51,24 @@ func (h *AccountHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 func (h *AccountHandler) GetStatement(w http.ResponseWriter, r *http.Request) {
 	actorID, isAdmin, err := requestActor(r)
 	if err != nil {
-		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		RespondError(w, r, http.StatusUnauthorized, "auth/unauthorized", "Unauthorized")
 		return
 	}
 
 	accountIDStr := chi.URLParam(r, "id")
 	accountID, err := uuid.Parse(accountIDStr)
 	if err != nil {
-		http.Error(w, "Invalid account ID", http.StatusBadRequest)
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-account-id", "Invalid account ID")
 		return
 	}
 	account, err := h.svc.GetBalance(r.Context(), accountID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to authorize account access: " + err.Error()})
+		zap.L().Error("account authorization lookup failed", zap.Error(err), zap.String("account_id", accountID.String()))
+		RespondError(w, r, http.StatusInternalServerError, "account/authorization-failed", "Failed to authorize account access")
 		return
 	}
 	if !isAdmin && account.UserID != actorID {
-		RespondError(w, http.StatusForbidden, "insufficient permissions")
+		RespondError(w, r, http.StatusForbidden, "auth/insufficient-permissions", "insufficient permissions")
 		return
 	}
 
@@ -81,9 +80,8 @@ func (h *AccountHandler) GetStatement(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := h.svc.GetStatement(r.Context(), accountID, page, pageSize)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to get statement: " + err.Error()})
+		zap.L().Error("get statement failed", zap.Error(err), zap.String("account_id", accountID.String()))
+		RespondError(w, r, http.StatusInternalServerError, "account/statement-read-failed", "Failed to get statement")
 		return
 	}
 
@@ -94,7 +92,7 @@ func (h *AccountHandler) GetStatement(w http.ResponseWriter, r *http.Request) {
 func (h *AccountHandler) CreateAccount(w http.ResponseWriter, r *http.Request) {
 	actorID, isAdmin, err := requestActor(r)
 	if err != nil {
-		RespondError(w, http.StatusUnauthorized, "Unauthorized")
+		RespondError(w, r, http.StatusUnauthorized, "auth/unauthorized", "Unauthorized")
 		return
 	}
 
@@ -104,29 +102,28 @@ func (h *AccountHandler) CreateAccount(w http.ResponseWriter, r *http.Request) {
 		Balance  int64  `json:"balance"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-body", "Invalid request body")
 		return
 	}
 
 	userID, err := uuid.Parse(req.UserID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid user_id"})
+		RespondError(w, r, http.StatusBadRequest, "request/invalid-user-id", "Invalid user_id")
 		return
 	}
 	if !isAdmin && userID != actorID {
-		RespondError(w, http.StatusForbidden, "insufficient permissions")
+		RespondError(w, r, http.StatusForbidden, "auth/insufficient-permissions", "insufficient permissions")
 		return
 	}
 
 	account, err := h.svc.CreateAccount(r.Context(), userID, req.Currency, req.Balance)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create account: " + err.Error()})
+		if status, pType, msg, ok := mapDBError(err); ok {
+			RespondError(w, r, status, pType, msg)
+			return
+		}
+		zap.L().Error("create account failed", zap.Error(err), zap.String("user_id", userID.String()))
+		RespondError(w, r, http.StatusInternalServerError, "account/create-failed", "Failed to create account")
 		return
 	}
 
