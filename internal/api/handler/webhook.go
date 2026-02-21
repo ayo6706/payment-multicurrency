@@ -49,7 +49,11 @@ func (h *WebhookHandler) HandleDepositWebhook(w http.ResponseWriter, r *http.Req
 			RespondError(w, r, http.StatusConflict, "webhook/reference-mismatch", "Reference already used with different payload")
 			return
 		}
-		RespondError(w, r, http.StatusBadRequest, "webhook/invalid-request", "Invalid webhook payload")
+		if errors.Is(err, service.ErrInvalidWebhookPayload) {
+			RespondError(w, r, http.StatusBadRequest, "webhook/invalid-request", "Invalid webhook payload")
+			return
+		}
+		RespondError(w, r, http.StatusInternalServerError, "webhook/internal-failure", "Failed to process webhook")
 		return
 	}
 

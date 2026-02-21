@@ -813,7 +813,6 @@ func TestWebhookInvalidSignature(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			payload := []byte(`{"account_id":"` + uuid.New().String() + `","amount_micros":1000,"currency":"USD","reference":"abc"}`)
 			req := httptest.NewRequest("POST", "/v1/webhooks/deposit", bytes.NewReader(payload))
@@ -825,6 +824,54 @@ func TestWebhookInvalidSignature(t *testing.T) {
 			assert.Equal(t, http.StatusUnauthorized, w.Code)
 		})
 	}
+}
+
+func TestWebhookInvalidPayloadReturnsBadRequest(t *testing.T) {
+	cleanupDB(t)
+	a := setupAPI()
+	client := a.Routes()
+
+	payload := []byte(`{"account_id":`)
+	sig := computeHMAC(payload, "test")
+
+	req := httptest.NewRequest("POST", "/v1/webhooks/deposit", bytes.NewReader(payload))
+	req.Header.Set("X-Webhook-Signature", sig)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	client.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestWebhookUnexpectedFailureReturnsServerError(t *testing.T) {
+	cleanupDB(t)
+	a := setupAPI()
+	client := a.Routes()
+	repo := repository.NewRepository(testDB)
+
+	_, err := testDB.Exec(context.Background(), "DELETE FROM accounts WHERE id = $1", repository.ToPgUUID(uuid.MustParse("22222222-2222-2222-2222-222222222222")))
+	require.NoError(t, err)
+
+	user := &models.User{ID: uuid.New(), Username: "hook-500", Email: "hook-500@example.com"}
+	require.NoError(t, repo.CreateUser(context.Background(), user))
+	acct := &models.Account{ID: uuid.New(), UserID: user.ID, Currency: "USD", Balance: 0}
+	require.NoError(t, repo.CreateAccount(context.Background(), acct))
+
+	payload := map[string]interface{}{
+		"account_id":    acct.ID,
+		"amount_micros": 1000,
+		"currency":      "USD",
+		"reference":     "hook-server-error",
+	}
+	body, _ := json.Marshal(payload)
+	sig := computeHMAC(body, "test")
+	req := httptest.NewRequest("POST", "/v1/webhooks/deposit", bytes.NewReader(body))
+	req.Header.Set("X-Webhook-Signature", sig)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	client.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
 func TestWebhookDepositSuccess(t *testing.T) {
@@ -848,7 +895,6 @@ func TestWebhookDepositSuccess(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			payload := map[string]interface{}{
 				"account_id":    acct.ID,

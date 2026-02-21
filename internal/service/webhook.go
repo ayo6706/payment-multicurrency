@@ -20,6 +20,7 @@ var (
 	ErrInvalidSignature       = errors.New("invalid signature")
 	ErrDepositInProgress      = errors.New("deposit is still processing")
 	ErrDepositPayloadMismatch = errors.New("deposit payload does not match existing reference")
+	ErrInvalidWebhookPayload  = errors.New("invalid webhook payload")
 )
 
 // WebhookService handles incoming webhook events from external systems.
@@ -65,29 +66,29 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 
 	var deposit DepositWebhookPayload
 	if err := json.Unmarshal(payload, &deposit); err != nil {
-		return nil, fmt.Errorf("invalid payload: %w", err)
+		return nil, fmt.Errorf("%w: invalid payload: %v", ErrInvalidWebhookPayload, err)
 	}
 	deposit.Currency = strings.ToUpper(strings.TrimSpace(deposit.Currency))
 	deposit.Reference = strings.TrimSpace(deposit.Reference)
 	deposit.AccountID = strings.TrimSpace(deposit.AccountID)
 
 	if deposit.AmountMicros <= 0 {
-		return nil, fmt.Errorf("invalid amount: %d", deposit.AmountMicros)
+		return nil, fmt.Errorf("%w: invalid amount: %d", ErrInvalidWebhookPayload, deposit.AmountMicros)
 	}
 	if deposit.Reference == "" {
-		return nil, errors.New("reference is required")
+		return nil, fmt.Errorf("%w: reference is required", ErrInvalidWebhookPayload)
 	}
 	if deposit.AccountID == "" {
-		return nil, errors.New("account_id is required")
+		return nil, fmt.Errorf("%w: account_id is required", ErrInvalidWebhookPayload)
 	}
 
 	if !isValidCurrency(deposit.Currency) {
-		return nil, fmt.Errorf("unsupported currency: %s", deposit.Currency)
+		return nil, fmt.Errorf("%w: unsupported currency: %s", ErrInvalidWebhookPayload, deposit.Currency)
 	}
 
 	accountID, err := uuid.Parse(deposit.AccountID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid account_id: %w", err)
+		return nil, fmt.Errorf("%w: invalid account_id: %v", ErrInvalidWebhookPayload, err)
 	}
 
 	queries := s.store.Queries()
@@ -99,23 +100,16 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 	retryExisting := false
 	transactionID := uuid.New()
 	if err == nil {
-		if existingTxRow.Type != domain.TxTypeDeposit || existingTxRow.Amount != deposit.AmountMicros || existingTxRow.Currency != deposit.Currency {
-			return nil, ErrDepositPayloadMismatch
+		replayResp, shouldRetry, existingTxID, resolveErr := evaluateExistingDepositReference(ctx, queries, deposit, existingTxRow)
+		if resolveErr != nil {
+			return nil, resolveErr
 		}
-		switch strings.ToUpper(existingTxRow.Status) {
-		case domain.TxStatusCompleted:
-			return &DepositWebhookResponse{
-				TransactionID: repository.FromPgUUID(existingTxRow.ID),
-				Status:        existingTxRow.Status,
-				Message:       "Deposit already processed",
-			}, nil
-		case domain.TxStatusPending, domain.TxStatusProcessing:
-			return nil, ErrDepositInProgress
-		case domain.TxStatusFailed:
+		if replayResp != nil {
+			return replayResp, nil
+		}
+		if shouldRetry {
 			retryExisting = true
-			transactionID = repository.FromPgUUID(existingTxRow.ID)
-		default:
-			return nil, fmt.Errorf("existing reference in unsupported state: %s", existingTxRow.Status)
+			transactionID = existingTxID
 		}
 	}
 
@@ -139,7 +133,7 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 		}
 
 		if accountRow.Currency != deposit.Currency {
-			return fmt.Errorf("currency mismatch: account is %s, deposit is %s", accountRow.Currency, deposit.Currency)
+			return fmt.Errorf("%w: currency mismatch: account is %s, deposit is %s", ErrInvalidWebhookPayload, accountRow.Currency, deposit.Currency)
 		}
 
 		if retryExisting {
@@ -216,6 +210,24 @@ func (s *WebhookService) HandleDepositWebhook(ctx context.Context, payload []byt
 		return nil
 	})
 	if err != nil {
+		if !retryExisting && isUniqueViolation(err) {
+			existing, lookupErr := queries.CheckTransactionIdempotency(ctx, deposit.Reference)
+			if lookupErr == nil {
+				replayResp, shouldRetry, _, resolveErr := evaluateExistingDepositReference(ctx, queries, deposit, existing)
+				if resolveErr != nil {
+					return nil, resolveErr
+				}
+				if replayResp != nil {
+					return replayResp, nil
+				}
+				if shouldRetry {
+					return nil, ErrDepositInProgress
+				}
+			} else if !errors.Is(lookupErr, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("failed to resolve duplicate deposit reference: %w", lookupErr)
+			}
+			return nil, ErrDepositInProgress
+		}
 		if !retryExisting {
 			failErr := s.transitionState(ctx, transactionID, domain.TxStatusFailed, "failed", []byte(`{"reason":"deposit_failed"}`))
 			if failErr != nil && !errors.Is(failErr, pgx.ErrNoRows) {
@@ -257,6 +269,50 @@ func isValidCurrency(currency string) bool {
 	default:
 		return false
 	}
+}
+
+func evaluateExistingDepositReference(ctx context.Context, queries *repository.Queries, deposit DepositWebhookPayload, existingTxRow repository.CheckTransactionIdempotencyRow) (*DepositWebhookResponse, bool, uuid.UUID, error) {
+	if existingTxRow.Type != domain.TxTypeDeposit || existingTxRow.Amount != deposit.AmountMicros || existingTxRow.Currency != deposit.Currency {
+		return nil, false, uuid.Nil, ErrDepositPayloadMismatch
+	}
+
+	existingTxID := repository.FromPgUUID(existingTxRow.ID)
+	txDetails, err := queries.GetTransaction(ctx, existingTxRow.ID)
+	if err != nil {
+		return nil, false, uuid.Nil, fmt.Errorf("failed to load existing transaction metadata: %w", err)
+	}
+	if !metadataMatchesDepositAccount(txDetails.Metadata, deposit.AccountID) {
+		return nil, false, uuid.Nil, ErrDepositPayloadMismatch
+	}
+
+	switch strings.ToUpper(existingTxRow.Status) {
+	case domain.TxStatusCompleted:
+		return &DepositWebhookResponse{
+			TransactionID: existingTxID,
+			Status:        existingTxRow.Status,
+			Message:       "Deposit already processed",
+		}, false, uuid.Nil, nil
+	case domain.TxStatusPending, domain.TxStatusProcessing:
+		return nil, false, uuid.Nil, ErrDepositInProgress
+	case domain.TxStatusFailed:
+		return nil, true, existingTxID, nil
+	default:
+		return nil, false, uuid.Nil, fmt.Errorf("existing reference in unsupported state: %s", existingTxRow.Status)
+	}
+}
+
+func metadataMatchesDepositAccount(metadata []byte, accountID string) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+
+	var txMeta map[string]string
+	if err := json.Unmarshal(metadata, &txMeta); err != nil {
+		return false
+	}
+
+	metadataAccountID := strings.TrimSpace(txMeta["account_id"])
+	return metadataAccountID != "" && metadataAccountID == strings.TrimSpace(accountID)
 }
 
 func (s *WebhookService) transitionState(ctx context.Context, transactionID uuid.UUID, nextState, action string, metadata []byte) error {
